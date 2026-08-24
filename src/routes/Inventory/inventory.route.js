@@ -1,41 +1,53 @@
-const express = require('express');
-const router = express.Router();
-const inventoryController = require('../../controller/Inventory/inventory.controller');
+const router = require("express").Router();
+const inventoryController = require("../../controller/Inventory/inventory.controller");
 
-// Executive KPI summary
-router.get('/summary', inventoryController.getSummary);
+// ── Dashboard ────────────────────────────────────────────────
+router.get("/filters", inventoryController.getInventoryFilters);
+router.get("/dashboard/cards", inventoryController.getInventoryDashboardCards);
+router.get("/dashboard/items", inventoryController.getInventoryDashboardItems);
 
-// Paginated current stock table
-router.get('/current', inventoryController.getCurrentStock);
+// ── Item Master ──────────────────────────────────────────────
+router.get("/items", inventoryController.getInventoryItems);
+router.get("/items/:itemCode/details", inventoryController.getItemDetails);
+router.get("/items/:itemCode/history", inventoryController.getItemHistory);
 
-// Warehouse-level summary
-router.get('/warehouses', inventoryController.getWarehouseSummary);
+// ── Goods Receipt ────────────────────────────────────────────
+router.post("/goods-receipt", inventoryController.createGoodsReceipt);
+router.get("/goods-receipt", inventoryController.getGoodsReceipts);
+router.get("/goods-receipt/:docEntry", inventoryController.getGoodsReceiptById);
 
-// Item Group / Category breakdown
-router.get('/item-groups', inventoryController.getItemGroupSummary);
+// ── Goods Issue ──────────────────────────────────────────────
+router.post("/goods-issue", inventoryController.createGoodsIssue);
+router.get("/goods-issue", inventoryController.getGoodsIssues);
+router.get("/goods-issue/:docEntry", inventoryController.getGoodsIssueById);
 
-// Inventory movement log (paginated)
-router.get('/movements', inventoryController.getMovements);
+// ── Inventory Transfer ───────────────────────────────────────
+router.post("/transfers", inventoryController.createInventoryTransfer);
+router.get("/transfers", inventoryController.getInventoryTransfers);
+router.get("/transfers/:docEntry", inventoryController.getInventoryTransferById);
 
-// Batch expiry analysis (bucketed)
-router.get('/expiry', inventoryController.getExpiry);
+// ── Delivery Challan ─────────────────────────────────────────
+router.get("/delivery-challans", inventoryController.getDeliveryChallans);
+router.get("/delivery-challans/:docEntry", inventoryController.getDeliveryChallanById);
 
-// Batch list (paginated)
-router.get('/batches', inventoryController.getBatches);
+// ── Incident Reporting ──────────────────────────────────────────
+router.get("/incident-reports", inventoryController.getIncidentReports);
+router.post("/incident-reports", inventoryController.createIncidentReport);
+router.get("/user-info", inventoryController.getUserInfo);
 
-// Purchase pipeline (open POs)
-router.get('/purchase-pipeline', inventoryController.getPurchasePipeline);
+// ── Training Calendar ───────────────────────────────────────────
+router.get("/trainings", inventoryController.getTrainings);
+router.post("/trainings", inventoryController.createTraining);
 
-// Sales commitments (open SOs)
-router.get('/commitments', inventoryController.getCommitments);
-
-// Production demand (open production orders)
-router.get('/production-demand', inventoryController.getProductionDemand);
-
-// Filter options (warehouses, item groups, categories)
-router.get('/filters', inventoryController.getFilterOptions);
-
-// Item detail drill-down
-router.get('/items/:itemCode', inventoryController.getItemDetail);
+// ── Lookups (CFL modals) ─────────────────────────────────────
+router.get("/next-docnum", inventoryController.getNextDocNum);
+router.get("/lookup/vendors", inventoryController.lookupVendors);
+router.get("/lookup/warehouses", inventoryController.lookupWarehouses);
+router.get("/lookup/accounts", inventoryController.lookupAccounts);
+router.get("/lookup/business-segments", inventoryController.lookupBusinessSegments);
+router.get("/lookup/cost-centers", inventoryController.lookupCostCenters);
+router.get("/lookup/branches", inventoryController.lookupBranches);
+router.get("/lookup/batches", inventoryController.lookupBatches);
+router.get("/lookup/serials", inventoryController.lookupSerials);
 
 module.exports = router;

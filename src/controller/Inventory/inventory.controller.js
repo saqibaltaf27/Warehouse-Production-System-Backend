@@ -1,865 +1,788 @@
+const jwt = require("jsonwebtoken");
+const inventoryModel = require("./inventory.model");
+const { sendSuccess, sendError } = require("../../utils/response.helper");
+const { logActivity } = require("../../utils/activityLogger");
 const { poolPromise } = require("../../database/connection");
-const { getSapDocumentType } = require("../../utils/sapDocTypes");
 
-// ─── Allowed sort columns (whitelist to prevent SQL injection) ──────────────
-const ALLOWED_SORT_COLUMNS = {
-  ItemCode: "iw.ItemCode",
-  ItemName: "m.ItemName",
-  WhsCode: "iw.WhsCode",
-  OnHand: "iw.OnHand",
-  IsCommited: "iw.IsCommited",
-  OnOrder: "iw.OnOrder",
-  AvgPrice: "m.AvgPrice",
-  ItmsGrpNam: "g.ItmsGrpNam",
-};
-
-// ─── Helper: safe integer parsing ───────────────────────────────────────────
-function safeInt(val, fallback) {
-  const n = parseInt(val, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-// ─── Helper: safe float ─────────────────────────────────────────────────────
-function safeNum(val) {
-  const n = parseFloat(val);
-  return Number.isFinite(n) ? n : 0;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/summary
-// Executive KPI cards
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getSummary(req, res) {
-  try {
-    const pool = await poolPromise;
-    const warehouse = req.query.warehouse || null;
-    const itemGroup = req.query.itemGroup || null;
-    const category = req.query.category || null;
-
-    let warehouseFilter = "";
-    let itemGroupFilter = "";
-    let categoryFilter = "";
-
-    if (warehouse) warehouseFilter = "AND iw.WhsCode = @warehouse";
-    if (itemGroup) itemGroupFilter = "AND m.ItmsGrpCod = @itemGroup";
-    if (category) categoryFilter = "AND m.U_cat1 = @category";
-
-    const query = `
-      ;WITH Stock AS (
-        SELECT
-          iw.ItemCode,
-          iw.WhsCode,
-          iw.OnHand,
-          iw.IsCommited,
-          iw.OnOrder,
-          iw.MinStock,
-          iw.MaxStock,
-          m.ItmsGrpCod,
-          m.U_cat1
-        FROM LDS_LIVE.dbo.OITW iw
-        INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-        WHERE 1=1
-          ${warehouseFilter}
-          ${itemGroupFilter}
-          ${categoryFilter}
-      )
-      SELECT
-        COUNT(DISTINCT CASE WHEN s.OnHand <> 0 THEN s.ItemCode END) AS ActiveSKUs,
-        COUNT(DISTINCT CASE WHEN s.OnHand <> 0 THEN s.WhsCode END) AS ActiveWarehouses,
-        ISNULL(SUM(s.OnHand), 0) AS TotalOnHand,
-        ISNULL(SUM(s.IsCommited), 0) AS TotalCommitted,
-        ISNULL(SUM(s.OnOrder), 0) AS TotalOnOrder,
-        ISNULL(SUM(s.OnHand - s.IsCommited), 0) AS TotalAvailable,
-        COUNT(DISTINCT CASE WHEN s.OnHand <= 0 THEN s.ItemCode END) AS OutOfStockItems,
-        COUNT(DISTINCT CASE WHEN s.OnHand < 0 THEN s.ItemCode END) AS NegativeStockItems,
-        COUNT(DISTINCT CASE WHEN s.MinStock > 0 AND (s.OnHand - s.IsCommited) < s.MinStock THEN s.ItemCode END) AS CriticalItems,
-        COUNT(DISTINCT CASE WHEN s.MaxStock > 0 AND s.OnHand > s.MaxStock THEN s.ItemCode END) AS ExcessItems
-      FROM Stock s
-    `;
-
-    const categoryWiseQuery = `
-      SELECT
-        ISNULL(NULLIF(LTRIM(RTRIM(m.U_cat1)), ''), 'Uncategorized') AS Category,
-        COUNT(DISTINCT iw.ItemCode) AS TotalSKUs,
-        ISNULL(SUM(iw.OnHand), 0) AS OnHand,
-        ISNULL(SUM(CASE WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) < 0 THEN 0 ELSE (iw.OnHand + iw.OnOrder - iw.IsCommited) END), 0) AS Available,
-        ISNULL(SUM(iw.IsCommited), 0) AS Committed,
-        ISNULL(SUM(iw.OnOrder), 0) AS OnOrder,
-        COUNT(DISTINCT CASE WHEN iw.MinStock > 0 AND (iw.OnHand - iw.IsCommited) < iw.MinStock THEN iw.ItemCode END) AS CriticalItems,
-        COUNT(DISTINCT CASE WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) < iw.IsCommited THEN iw.ItemCode END) AS OutOfStockItems,
-        COUNT(DISTINCT CASE WHEN iw.OnHand < 0 THEN iw.ItemCode END) AS NegativeStockItems,
-        COUNT(DISTINCT CASE WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) > iw.IsCommited AND iw.IsCommited > 0 THEN iw.ItemCode END) AS ExcessStockItems
-      FROM LDS_LIVE.dbo.OITW iw
-      INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      WHERE 1=1
-        ${warehouseFilter}
-        ${itemGroupFilter}
-        ${categoryFilter}
-      GROUP BY ISNULL(NULLIF(LTRIM(RTRIM(m.U_cat1)), ''), 'Uncategorized')
-      ORDER BY OnHand DESC
-    `;
-
-    const request = pool.request();
-    if (warehouse) request.input("warehouse", warehouse);
-    if (itemGroup) request.input("itemGroup", parseInt(itemGroup));
-    if (category) request.input("category", category);
-
-    const [result, categoryWiseResult] = await Promise.all([
-      request.query(query),
-      request.query(categoryWiseQuery)
-    ]);
-    const summary = result.recordset[0];
-
-    // Batch expiry query (separate grain)
-    const expiryQuery = `
-      SELECT
-        COUNT(DISTINCT CASE WHEN b.ExpDate IS NOT NULL AND b.ExpDate < GETDATE() THEN CONCAT(b.ItemCode, '-', b.DistNumber) END) AS ExpiredBatches,
-        COUNT(DISTINCT CASE WHEN b.ExpDate IS NOT NULL AND b.ExpDate >= GETDATE() AND b.ExpDate <= DATEADD(DAY, 90, GETDATE()) THEN CONCAT(b.ItemCode, '-', b.DistNumber) END) AS NearExpiryBatches
-      FROM LDS_LIVE.dbo.OBTN b
-      INNER JOIN LDS_LIVE.dbo.OBTQ q ON b.ItemCode = q.ItemCode AND b.SysNumber = q.SysNumber
-      WHERE q.Quantity > 0
-    `;
-    const expiryResult = await pool.request().query(expiryQuery);
-    const expiry = expiryResult.recordset[0];
-
-    return res.json({
-      success: true,
-      data: {
-        activeSKUs: summary.ActiveSKUs || 0,
-        activeWarehouses: summary.ActiveWarehouses || 0,
-        totalOnHand: safeNum(summary.TotalOnHand),
-        totalCommitted: safeNum(summary.TotalCommitted),
-        totalOnOrder: safeNum(summary.TotalOnOrder),
-        totalAvailable: safeNum(summary.TotalAvailable),
-        outOfStockItems: summary.OutOfStockItems || 0,
-        negativeStockItems: summary.NegativeStockItems || 0,
-        criticalItems: summary.CriticalItems || 0,
-        excessItems: summary.ExcessItems || 0,
-        expiredBatches: expiry.ExpiredBatches || 0,
-        nearExpiryBatches: expiry.NearExpiryBatches || 0,
-        categoryWise: categoryWiseResult.recordset,
-      },
-    });
-  } catch (error) {
-    console.error("Inventory summary error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve inventory summary" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/current
-// Paginated, searchable, filterable inventory table
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getCurrentStock(req, res) {
-  try {
-    const pool = await poolPromise;
-    const page = safeInt(req.query.page, 1);
-    const pageSize = Math.min(safeInt(req.query.pageSize, 50), 200);
-    const search = req.query.search || "";
-    const warehouse = req.query.warehouse || null;
-    const itemGroup = req.query.itemGroup || null;
-    const category = req.query.category || null;
-    const status = req.query.status || null;
-    const sortBy = req.query.sortBy || "ItemCode";
-    const sortOrder = (req.query.sortOrder || "").toUpperCase() === "DESC" ? "DESC" : "ASC";
-
-    const sortColumn = ALLOWED_SORT_COLUMNS[sortBy] || "iw.ItemCode";
-
-    let filters = "";
-    if (warehouse) filters += " AND iw.WhsCode = @warehouse";
-    if (itemGroup) filters += " AND m.ItmsGrpCod = @itemGroup";
-    if (category) filters += " AND m.U_cat1 = @category";
-    if (search) filters += " AND (iw.ItemCode LIKE @search OR m.ItemName LIKE @search)";
-
-    // Status filter
-    if (status === "out") filters += " AND (iw.OnHand + iw.OnOrder - iw.IsCommited) < iw.IsCommited";
-    else if (status === "excess") filters += " AND (iw.OnHand + iw.OnOrder - iw.IsCommited) > iw.IsCommited AND iw.IsCommited > 0";
-    else if (status === "normal") filters += " AND NOT ((iw.OnHand + iw.OnOrder - iw.IsCommited) < iw.IsCommited OR ((iw.OnHand + iw.OnOrder - iw.IsCommited) > iw.IsCommited AND iw.IsCommited > 0))";
-
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM LDS_LIVE.dbo.OITW iw
-      INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OITB g ON m.ItmsGrpCod = g.ItmsGrpCod
-      WHERE (iw.OnHand <> 0 OR iw.IsCommited <> 0 OR iw.OnOrder <> 0)
-        ${filters}
-    `;
-
-    const dataQuery = `
-      SELECT
-        iw.ItemCode,
-        m.ItemName,
-        g.ItmsGrpNam AS ItemGroup,
-        m.U_cat1 AS Category,
-        m.U_Division AS Division,
-        iw.WhsCode,
-        w.WhsName,
-        iw.OnHand,
-        iw.IsCommited AS Committed,
-        iw.OnOrder,
-        CASE WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) < 0 THEN 0 ELSE (iw.OnHand + iw.OnOrder - iw.IsCommited) END AS Available,
-        CASE WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) < 0 THEN ABS(iw.OnHand + iw.OnOrder - iw.IsCommited) ELSE 0 END AS OutOfOrder,
-        iw.MinStock,
-        iw.MaxStock,
-        m.InvntryUom AS UOM,
-        CASE
-          WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) < iw.IsCommited THEN 'Out of Stock'
-          WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) > iw.IsCommited AND iw.IsCommited > 0 THEN 'Excess'
-          ELSE 'Normal'
-        END AS StockStatus
-      FROM LDS_LIVE.dbo.OITW iw
-      INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OITB g ON m.ItmsGrpCod = g.ItmsGrpCod
-      LEFT JOIN LDS_LIVE.dbo.OWHS w ON iw.WhsCode = w.WhsCode
-      WHERE (iw.OnHand <> 0 OR iw.IsCommited <> 0 OR iw.OnOrder <> 0)
-        ${filters}
-      ORDER BY ${sortColumn} ${sortOrder}
-      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-    `;
-
-    const request = pool.request();
-    request.input("offset", offset);
-    request.input("pageSize", pageSize);
-    if (warehouse) request.input("warehouse", warehouse);
-    if (itemGroup) request.input("itemGroup", parseInt(itemGroup));
-    if (category) request.input("category", category);
-    if (search) request.input("search", `%${search}%`);
-
-    const [countResult, dataResult] = await Promise.all([
-      request.query(countQuery),
-      request.query(dataQuery),
-    ]);
-
-    const totalRecords = countResult.recordset[0].total;
-
-    return res.json({
-      success: true,
-      data: dataResult.recordset,
-      pagination: {
-        page,
-        pageSize,
-        totalRecords,
-        totalPages: Math.ceil(totalRecords / pageSize),
-      },
-    });
-  } catch (error) {
-    console.error("Current stock error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve current stock data" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/warehouses
-// Warehouse-level inventory summary
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getWarehouseSummary(req, res) {
-  try {
-    const pool = await poolPromise;
-    const query = `
-      SELECT
-        iw.WhsCode,
-        w.WhsName,
-        COUNT(DISTINCT iw.ItemCode) AS TotalSKUs,
-        ISNULL(SUM(iw.OnHand), 0) AS TotalOnHand,
-        ISNULL(SUM(iw.IsCommited), 0) AS TotalCommitted,
-        ISNULL(SUM(iw.OnOrder), 0) AS TotalOnOrder,
-        ISNULL(SUM(CASE WHEN (iw.OnHand + iw.OnOrder - iw.IsCommited) < 0 THEN 0 ELSE (iw.OnHand + iw.OnOrder - iw.IsCommited) END), 0) AS TotalAvailable,
-        SUM(CASE WHEN iw.OnHand <= 0 THEN 1 ELSE 0 END) AS OutOfStockItems,
-        SUM(CASE WHEN iw.MinStock > 0 AND (iw.OnHand - iw.IsCommited) < iw.MinStock THEN 1 ELSE 0 END) AS CriticalItems
-      FROM LDS_LIVE.dbo.OITW iw
-      INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OWHS w ON iw.WhsCode = w.WhsCode
-      WHERE iw.OnHand <> 0 OR iw.IsCommited <> 0 OR iw.OnOrder <> 0
-      GROUP BY iw.WhsCode, w.WhsName
-      ORDER BY TotalOnHand DESC
-    `;
-    const result = await pool.request().query(query);
-    return res.json({ success: true, data: result.recordset });
-  } catch (error) {
-    console.error("Warehouse summary error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve warehouse summary" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/item-groups
-// Item Group / Category breakdown
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getItemGroupSummary(req, res) {
-  try {
-    const pool = await poolPromise;
-    const query = `
-      SELECT
-        g.ItmsGrpNam AS ItemGroup,
-        COUNT(DISTINCT iw.ItemCode) AS TotalSKUs,
-        ISNULL(SUM(iw.OnHand), 0) AS TotalOnHand,
-        ISNULL(SUM(iw.IsCommited), 0) AS TotalCommitted,
-        ISNULL(SUM(iw.OnHand - iw.IsCommited), 0) AS TotalAvailable
-      FROM LDS_LIVE.dbo.OITW iw
-      INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OITB g ON m.ItmsGrpCod = g.ItmsGrpCod
-      WHERE iw.OnHand <> 0 OR iw.IsCommited <> 0
-      GROUP BY g.ItmsGrpNam
-      ORDER BY TotalOnHand DESC
-    `;
-    const result = await pool.request().query(query);
-    return res.json({ success: true, data: result.recordset });
-  } catch (error) {
-    console.error("Item group summary error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve item group summary" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/movements
-// Paginated inventory movement log from OINM
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getMovements(req, res) {
-  try {
-    const pool = await poolPromise;
-    const page = safeInt(req.query.page, 1);
-    const pageSize = Math.min(safeInt(req.query.pageSize, 50), 200);
-    const search = req.query.search || "";
-    const warehouse = req.query.warehouse || null;
-    const fromDate = req.query.fromDate || null;
-    const toDate = req.query.toDate || null;
-    const transType = req.query.transType || null;
-
-    let filters = "";
-    if (warehouse) filters += " AND n.Warehouse = @warehouse";
-    if (search) filters += " AND (n.ItemCode LIKE @search)";
-    if (fromDate) filters += " AND n.DocDate >= @fromDate";
-    if (toDate) filters += " AND n.DocDate <= @toDate";
-    if (transType) filters += " AND n.TransType = @transType";
-
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM LDS_LIVE.dbo.OINM n
-      WHERE 1=1 ${filters}
-    `;
-
-    const dataQuery = `
-      SELECT
-        n.DocDate,
-        n.ItemCode,
-        m.ItemName,
-        n.Warehouse,
-        w.WhsName,
-        n.TransType,
-        n.InQty,
-        n.OutQty,
-        n.BASE_REF AS DocNumber
-      FROM LDS_LIVE.dbo.OINM n
-      LEFT JOIN LDS_LIVE.dbo.OITM m ON n.ItemCode = m.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OWHS w ON n.Warehouse = w.WhsCode
-      WHERE 1=1 ${filters}
-      ORDER BY n.DocDate DESC, n.CreatedBy DESC
-      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-    `;
-
-    const request = pool.request();
-    request.input("offset", offset);
-    request.input("pageSize", pageSize);
-    if (warehouse) request.input("warehouse", warehouse);
-    if (search) request.input("search", `%${search}%`);
-    if (fromDate) request.input("fromDate", fromDate);
-    if (toDate) request.input("toDate", toDate);
-    if (transType) request.input("transType", parseInt(transType));
-
-    const [countResult, dataResult] = await Promise.all([
-      request.query(countQuery),
-      request.query(dataQuery),
-    ]);
-
-    // Map TransType to human-readable names
-    const mapped = dataResult.recordset.map((row) => ({
-      ...row,
-      TransTypeName: getSapDocumentType(row.TransType),
-    }));
-
-    return res.json({
-      success: true,
-      data: mapped,
-      pagination: {
-        page,
-        pageSize,
-        totalRecords: countResult.recordset[0].total,
-        totalPages: Math.ceil(countResult.recordset[0].total / pageSize),
-      },
-    });
-  } catch (error) {
-    console.error("Movements error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve inventory movements" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/expiry
-// Batch expiry analysis
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getExpiry(req, res) {
-  try {
-    const pool = await poolPromise;
-
-    // Bucketed summary
-    const bucketQuery = `
-      SELECT
-        CASE
-          WHEN b.ExpDate < GETDATE() THEN 'Expired'
-          WHEN b.ExpDate <= DATEADD(DAY, 30, GETDATE()) THEN '0-30 Days'
-          WHEN b.ExpDate <= DATEADD(DAY, 60, GETDATE()) THEN '31-60 Days'
-          WHEN b.ExpDate <= DATEADD(DAY, 90, GETDATE()) THEN '61-90 Days'
-          WHEN b.ExpDate <= DATEADD(DAY, 180, GETDATE()) THEN '91-180 Days'
-          ELSE '180+ Days'
-        END AS Bucket,
-        COUNT(DISTINCT CONCAT(b.ItemCode, '-', b.DistNumber)) AS BatchCount,
-        ISNULL(SUM(q.Quantity), 0) AS TotalQuantity
-      FROM LDS_LIVE.dbo.OBTN b
-      INNER JOIN LDS_LIVE.dbo.OBTQ q ON b.ItemCode = q.ItemCode AND b.SysNumber = q.SysNumber
-      WHERE b.ExpDate IS NOT NULL AND q.Quantity > 0
-      GROUP BY
-        CASE
-          WHEN b.ExpDate < GETDATE() THEN 'Expired'
-          WHEN b.ExpDate <= DATEADD(DAY, 30, GETDATE()) THEN '0-30 Days'
-          WHEN b.ExpDate <= DATEADD(DAY, 60, GETDATE()) THEN '31-60 Days'
-          WHEN b.ExpDate <= DATEADD(DAY, 90, GETDATE()) THEN '61-90 Days'
-          WHEN b.ExpDate <= DATEADD(DAY, 180, GETDATE()) THEN '91-180 Days'
-          ELSE '180+ Days'
-        END
-    `;
-    const result = await pool.request().query(bucketQuery);
-
-    return res.json({ success: true, data: result.recordset });
-  } catch (error) {
-    console.error("Expiry error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve expiry data" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/batches
-// Paginated batch list with QC status
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getBatches(req, res) {
-  try {
-    const pool = await poolPromise;
-    const page = safeInt(req.query.page, 1);
-    const pageSize = Math.min(safeInt(req.query.pageSize, 50), 200);
-    const search = req.query.search || "";
-    const expiryStatus = req.query.expiryStatus || null;
-    const expiryBucket = req.query.expiryBucket || null;
-
-    let filters = "";
-    if (search) filters += " AND (b.ItemCode LIKE @search OR b.DistNumber LIKE @search)";
-    if (expiryStatus === "expired") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate < GETDATE()";
-    else if (expiryStatus === "near") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate >= GETDATE() AND b.ExpDate <= DATEADD(DAY, 90, GETDATE())";
-
-    if (expiryBucket) {
-      if (expiryBucket === "Expired") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate < CAST(GETDATE() AS DATE)";
-      else if (expiryBucket === "0-30 Days") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate >= CAST(GETDATE() AS DATE) AND b.ExpDate <= DATEADD(DAY, 30, CAST(GETDATE() AS DATE))";
-      else if (expiryBucket === "31-60 Days") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate > DATEADD(DAY, 30, CAST(GETDATE() AS DATE)) AND b.ExpDate <= DATEADD(DAY, 60, CAST(GETDATE() AS DATE))";
-      else if (expiryBucket === "61-90 Days") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate > DATEADD(DAY, 60, CAST(GETDATE() AS DATE)) AND b.ExpDate <= DATEADD(DAY, 90, CAST(GETDATE() AS DATE))";
-      else if (expiryBucket === "91-180 Days") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate > DATEADD(DAY, 90, CAST(GETDATE() AS DATE)) AND b.ExpDate <= DATEADD(DAY, 180, CAST(GETDATE() AS DATE))";
-      else if (expiryBucket === "180+ Days") filters += " AND b.ExpDate IS NOT NULL AND b.ExpDate > DATEADD(DAY, 180, CAST(GETDATE() AS DATE))";
+class InventoryController {
+    static async getInventoryFilters(req, res) {
+        try {
+            const company = req.query.company || null;
+            const filters = await inventoryModel.getInventoryFilters(company);
+            sendSuccess(res, filters, "Filters fetched successfully");
+        } catch (err) {
+            sendError(res, "Filters not fetched successfully", err.statusCode || 500);
+        }
     }
 
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM LDS_LIVE.dbo.OBTN b
-      INNER JOIN LDS_LIVE.dbo.OBTQ q ON b.ItemCode = q.ItemCode AND b.SysNumber = q.SysNumber
-      WHERE q.Quantity > 0 ${filters}
-    `;
-
-    const dataQuery = `
-      SELECT
-        b.ItemCode,
-        m.ItemName,
-        b.DistNumber AS BatchNumber,
-        q.WhsCode,
-        w.WhsName,
-        q.Quantity,
-        b.MnfDate,
-        b.Indate AS AdmissionDate,
-        b.ExpDate,
-        CASE
-          WHEN b.ExpDate IS NULL THEN NULL
-          ELSE DATEDIFF(DAY, GETDATE(), b.ExpDate)
-        END AS DaysUntilExpiry,
-        b.U_QCDecision AS QCDecision,
-        b.U_Status AS QCStatus
-      FROM LDS_LIVE.dbo.OBTN b
-      INNER JOIN LDS_LIVE.dbo.OBTQ q ON b.ItemCode = q.ItemCode AND b.SysNumber = q.SysNumber
-      LEFT JOIN LDS_LIVE.dbo.OITM m ON b.ItemCode = m.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OWHS w ON q.WhsCode = w.WhsCode
-      WHERE q.Quantity > 0 ${filters}
-      ORDER BY b.ExpDate ASC
-      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-    `;
-
-    const request = pool.request();
-    request.input("offset", offset);
-    request.input("pageSize", pageSize);
-    if (search) request.input("search", `%${search}%`);
-
-    const [countResult, dataResult] = await Promise.all([
-      request.query(countQuery),
-      request.query(dataQuery),
-    ]);
-
-    return res.json({
-      success: true,
-      data: dataResult.recordset,
-      pagination: {
-        page,
-        pageSize,
-        totalRecords: countResult.recordset[0].total,
-        totalPages: Math.ceil(countResult.recordset[0].total / pageSize),
-      },
-    });
-  } catch (error) {
-    console.error("Batches error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve batch data" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/purchase-pipeline
-// Open Purchase Orders (incoming stock pipeline)
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getPurchasePipeline(req, res) {
-  try {
-    const pool = await poolPromise;
-    const page = safeInt(req.query.page, 1);
-    const pageSize = Math.min(safeInt(req.query.pageSize, 50), 200);
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM LDS_LIVE.dbo.OPOR h
-      INNER JOIN LDS_LIVE.dbo.POR1 l ON h.DocEntry = l.DocEntry
-      WHERE h.DocStatus = 'O' AND l.LineStatus = 'O'
-    `;
-
-    const dataQuery = `
-      SELECT
-        h.DocNum AS PONumber,
-        h.CardName AS Supplier,
-        l.ItemCode,
-        m.ItemName,
-        l.WhsCode,
-        l.Quantity AS OrderedQty,
-        (l.Quantity - l.OpenQty) AS ReceivedQty,
-        l.OpenQty,
-        l.ShipDate AS ExpectedDelivery,
-        DATEDIFF(DAY, GETDATE(), l.ShipDate) AS DaysUntilDelivery
-      FROM LDS_LIVE.dbo.OPOR h
-      INNER JOIN LDS_LIVE.dbo.POR1 l ON h.DocEntry = l.DocEntry
-      LEFT JOIN LDS_LIVE.dbo.OITM m ON l.ItemCode = m.ItemCode
-      WHERE h.DocStatus = 'O' AND l.LineStatus = 'O'
-      ORDER BY l.ShipDate ASC
-      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-    `;
-
-    const request = pool.request();
-    request.input("offset", offset);
-    request.input("pageSize", pageSize);
-
-    const [countResult, dataResult] = await Promise.all([
-      request.query(countQuery),
-      request.query(dataQuery),
-    ]);
-
-    return res.json({
-      success: true,
-      data: dataResult.recordset,
-      pagination: {
-        page,
-        pageSize,
-        totalRecords: countResult.recordset[0].total,
-        totalPages: Math.ceil(countResult.recordset[0].total / pageSize),
-      },
-    });
-  } catch (error) {
-    console.error("Purchase pipeline error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve purchase pipeline" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/commitments
-// Open Sales Orders (committed stock detail)
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getCommitments(req, res) {
-  try {
-    const pool = await poolPromise;
-    const page = safeInt(req.query.page, 1);
-    const pageSize = Math.min(safeInt(req.query.pageSize, 50), 200);
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM LDS_LIVE.dbo.ORDR h
-      INNER JOIN LDS_LIVE.dbo.RDR1 l ON h.DocEntry = l.DocEntry
-      WHERE h.DocStatus = 'O' AND l.LineStatus = 'O'
-    `;
-
-    const dataQuery = `
-      SELECT
-        h.DocNum AS SONumber,
-        h.CardName AS Customer,
-        l.ItemCode,
-        m.ItemName,
-        l.WhsCode,
-        l.Quantity AS OrderedQty,
-        (l.Quantity - l.OpenQty) AS DeliveredQty,
-        l.OpenQty,
-        l.ShipDate AS RequiredDate,
-        DATEDIFF(DAY, GETDATE(), l.ShipDate) AS DaysUntilDue
-      FROM LDS_LIVE.dbo.ORDR h
-      INNER JOIN LDS_LIVE.dbo.RDR1 l ON h.DocEntry = l.DocEntry
-      LEFT JOIN LDS_LIVE.dbo.OITM m ON l.ItemCode = m.ItemCode
-      WHERE h.DocStatus = 'O' AND l.LineStatus = 'O'
-      ORDER BY l.ShipDate ASC
-      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-    `;
-
-    const request = pool.request();
-    request.input("offset", offset);
-    request.input("pageSize", pageSize);
-
-    const [countResult, dataResult] = await Promise.all([
-      request.query(countQuery),
-      request.query(dataQuery),
-    ]);
-
-    return res.json({
-      success: true,
-      data: dataResult.recordset,
-      pagination: {
-        page,
-        pageSize,
-        totalRecords: countResult.recordset[0].total,
-        totalPages: Math.ceil(countResult.recordset[0].total / pageSize),
-      },
-    });
-  } catch (error) {
-    console.error("Commitments error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve commitment data" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/production-demand
-// Raw material requirements from open production orders
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getProductionDemand(req, res) {
-  try {
-    const pool = await poolPromise;
-    const page = safeInt(req.query.page, 1);
-    const pageSize = Math.min(safeInt(req.query.pageSize, 50), 200);
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `
-      SELECT COUNT(DISTINCT c.ItemCode) AS total
-      FROM LDS_LIVE.dbo.WOR1 c
-      INNER JOIN LDS_LIVE.dbo.OWOR h ON c.DocEntry = h.DocEntry
-      WHERE h.Status IN ('R', 'P')
-        AND c.ItemType = 4
-        AND c.PlannedQty > c.IssuedQty
-    `;
-
-    const dataQuery = `
-      SELECT
-        c.ItemCode,
-        m.ItemName,
-        SUM(c.PlannedQty) AS TotalPlanned,
-        SUM(c.IssuedQty) AS TotalIssued,
-        SUM(c.PlannedQty - c.IssuedQty) AS RemainingRequirement,
-        ISNULL(
-          (SELECT SUM(iw.OnHand - iw.IsCommited) FROM LDS_LIVE.dbo.OITW iw WHERE iw.ItemCode = c.ItemCode),
-        0) AS AvailableStock,
-        CASE
-          WHEN ISNULL(
-            (SELECT SUM(iw.OnHand - iw.IsCommited) FROM LDS_LIVE.dbo.OITW iw WHERE iw.ItemCode = c.ItemCode),
-          0) < SUM(c.PlannedQty - c.IssuedQty)
-          THEN SUM(c.PlannedQty - c.IssuedQty) - ISNULL(
-            (SELECT SUM(iw.OnHand - iw.IsCommited) FROM LDS_LIVE.dbo.OITW iw WHERE iw.ItemCode = c.ItemCode),
-          0)
-          ELSE 0
-        END AS ShortageQty
-      FROM LDS_LIVE.dbo.WOR1 c
-      INNER JOIN LDS_LIVE.dbo.OWOR h ON c.DocEntry = h.DocEntry
-      LEFT JOIN LDS_LIVE.dbo.OITM m ON c.ItemCode = m.ItemCode
-      WHERE h.Status IN ('R', 'P')
-        AND c.ItemType = 4
-        AND c.PlannedQty > c.IssuedQty
-      GROUP BY c.ItemCode, m.ItemName
-      ORDER BY ShortageQty DESC
-      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-    `;
-
-    const request = pool.request();
-    request.input("offset", offset);
-    request.input("pageSize", pageSize);
-
-    const [countResult, dataResult] = await Promise.all([
-      request.query(countQuery),
-      request.query(dataQuery),
-    ]);
-
-    return res.json({
-      success: true,
-      data: dataResult.recordset,
-      pagination: {
-        page,
-        pageSize,
-        totalRecords: countResult.recordset[0].total,
-        totalPages: Math.ceil(countResult.recordset[0].total / pageSize),
-      },
-    });
-  } catch (error) {
-    console.error("Production demand error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve production demand" });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/items/:itemCode
-// Detailed item drill-down
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getItemDetail(req, res) {
-  try {
-    const pool = await poolPromise;
-    const itemCode = req.params.itemCode;
-
-    if (!itemCode) {
-      return res.status(400).json({ success: false, message: "Item code is required" });
+    static async getInventoryDashboardCards(req, res) {
+        try {
+            const sanitize = (val) => (val && val !== 'ALL' ? val : null);
+            const filters = {
+                company: sanitize(req.query.company),
+                group: sanitize(req.query.group),
+                category: sanitize(req.query.category),
+                warehouse: sanitize(req.query.warehouse),
+                fiscalYear: sanitize(req.query.fiscalYear)
+            };
+            const items = await inventoryModel.getInventoryDashboardCards(filters);
+            sendSuccess(res, items, "Dashboard cards fetched successfully");
+        } catch (err) {
+            sendError(res, "Dashboard cards not fetched successfully", err.statusCode || 500);
+        }
     }
 
-    const request = pool.request().input("itemCode", itemCode);
+    static async getInventoryDashboardItems(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const rawLimit = req.query.limit;
+            const limit = (rawLimit === '0' || rawLimit === 'all' || rawLimit === 'ALL')
+                ? 0 
+                : (parseInt(rawLimit, 10) || 10);
+            const offset = limit > 0 ? (page - 1) * limit : 0;
 
-    // Overview
-    const overviewQuery = `
-      SELECT
-        m.ItemCode, m.ItemName, m.ItmsGrpCod,
-        g.ItmsGrpNam AS ItemGroup,
-        m.U_cat1 AS Category, m.U_Division AS Division,
-        m.InvntryUom AS UOM, m.OnHand, m.IsCommited AS Committed, m.OnOrder,
-        (m.OnHand - m.IsCommited) AS Available,
-        (m.OnHand + m.OnOrder - m.IsCommited) AS Projected
-      FROM LDS_LIVE.dbo.OITM m
-      LEFT JOIN LDS_LIVE.dbo.OITB g ON m.ItmsGrpCod = g.ItmsGrpCod
-      WHERE m.ItemCode = @itemCode
-    `;
+            const sanitize = (val) => (val && val !== 'ALL' && val !== 'all' ? val : null);
+            const sortColumns = ['ItemCode', 'ItemName', 'Category', 'StockQty', 'ExpiryDate', 'DaysToExpiry', 'BatchNumber', 'Company'];
+            const sortBy = sortColumns.includes(req.query.sortBy) ? req.query.sortBy : 'ExpiryDate';
+            const sortOrder = (req.query.sortOrder && req.query.sortOrder.toUpperCase() === "DESC") ? "DESC" : "ASC";
 
-    // Warehouse breakdown
-    const warehouseQuery = `
-      SELECT
-        iw.WhsCode, w.WhsName,
-        iw.OnHand, iw.IsCommited AS Committed, iw.OnOrder,
-        (iw.OnHand - iw.IsCommited) AS Available
-      FROM LDS_LIVE.dbo.OITW iw
-      LEFT JOIN LDS_LIVE.dbo.OWHS w ON iw.WhsCode = w.WhsCode
-      LEFT JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      WHERE iw.ItemCode = @itemCode AND (iw.OnHand <> 0 OR iw.IsCommited <> 0 OR iw.OnOrder <> 0)
-      ORDER BY iw.OnHand DESC
-    `;
+            const pagination = { limit, offset, page };
+            const sorting = { sortBy, sortOrder };
+            const filters = {
+                company: sanitize(req.query.company),
+                group: sanitize(req.query.group),
+                category: sanitize(req.query.category),
+                warehouse: sanitize(req.query.warehouse),
+                fiscalYear: sanitize(req.query.fiscalYear),
+                search: req.query.search ? req.query.search.trim() : null,
+                agingBucket: sanitize(req.query.agingBucket)
+            };
 
-    // Recent movements (last 20)
-    const movementsQuery = `
-      SELECT TOP 20
-        n.DocDate, n.Warehouse, n.TransType, n.InQty, n.OutQty, n.BASE_REF AS DocNumber
-      FROM LDS_LIVE.dbo.OINM n
-      WHERE n.ItemCode = @itemCode
-      ORDER BY n.DocDate DESC, n.CreatedBy DESC
-    `;
+            const items = await inventoryModel.getInventoryDashboardItems(pagination, sorting, filters);
+            sendSuccess(res, items, "Items fetched successfully");
+        } catch (err) {
+            console.error("getInventoryDashboardItems error:", err);
+            sendError(res, "Items not fetched successfully", err.statusCode || 500);
+        }
+    }
 
-    // Batches
-    const batchQuery = `
-      SELECT
-        b.DistNumber AS BatchNumber, q.WhsCode, q.Quantity, b.ExpDate,
-        CASE WHEN b.ExpDate IS NOT NULL THEN DATEDIFF(DAY, GETDATE(), b.ExpDate) ELSE NULL END AS DaysUntilExpiry,
-        b.U_QCDecision AS QCDecision
-      FROM LDS_LIVE.dbo.OBTN b
-      INNER JOIN LDS_LIVE.dbo.OBTQ q ON b.ItemCode = q.ItemCode AND b.SysNumber = q.SysNumber
-      WHERE b.ItemCode = @itemCode AND q.Quantity > 0
-      ORDER BY b.ExpDate ASC
-    `;
 
-    const [overviewRes, warehouseRes, movementsRes, batchRes] = await Promise.all([
-      request.query(overviewQuery),
-      request.query(warehouseQuery),
-      request.query(movementsQuery),
-      request.query(batchQuery),
-    ]);
+    static async getInventoryItems(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 10;
+            const offset = (page - 1) * limit;
 
-    const movements = movementsRes.recordset.map((row) => ({
-      ...row,
-      TransTypeName: getSapDocumentType(row.TransType),
-    }));
+            const sortColumns = ['ItemCode', 'ItemName', 'FrgnName', 'Category', 'Stock', 'Price', 'CreateDate'];
+            const sortBy = sortColumns.includes(req.query.sortBy) ? req.query.sortBy : 'Stock';
+            const sortOrder = (req.query.sortOrder && req.query.sortOrder.toUpperCase() === "ASC") ? "ASC" : "DESC";
 
-    return res.json({
-      success: true,
-      data: {
-        overview: overviewRes.recordset[0] || null,
-        warehouses: warehouseRes.recordset,
-        movements,
-        batches: batchRes.recordset,
-      },
-    });
-  } catch (error) {
-    console.error("Item detail error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve item details" });
-  }
+            const pagination = { limit, offset };
+            const sorting = { sortBy, sortOrder };
+            const sanitize = (val) => (val && val !== 'ALL' ? val : null);
+
+            const filters = {
+                company: sanitize(req.query.company),
+                group: sanitize(req.query.group),
+                category: sanitize(req.query.category),
+                warehouse: sanitize(req.query.warehouse),
+                fiscalYear: sanitize(req.query.fiscalYear),
+                hideZeroQty: req.query.hideZeroQty === 'true'
+            };
+            const search = sanitize(req.query.search);
+
+            const items = await inventoryModel.getInventoryItems(pagination, sorting, filters, search);
+            sendSuccess(res, items, "Item Master fetched successfully");
+        } catch (err) {
+            sendError(res, "Item Master not fetched successfully", err.statusCode || 500);
+        }
+    }
+
+    static async getItemDetails(req, res) {
+        try {
+            const itemCode = req.params.itemCode;
+            const company = req.query.company || 'GMS';
+
+            if (!itemCode) {
+                return sendError(res, "ItemCode is required", 400);
+            }
+
+            const [warehouses, expiryLots] = await Promise.all([
+                inventoryModel.getItemWarehouses(itemCode, company),
+                inventoryModel.getItemExpiryLots(itemCode, company)
+            ]);
+
+            // Get metadata and history (fastest way for now without splitting metadata from history)
+            // But we pass an impossible date range so we only get metadata (history array will be empty)
+            const meta = await inventoryModel.getItemHistory(itemCode, company, { startDate: '1900-01-01', endDate: '1900-01-01' });
+            
+            const details = {
+                ...meta,
+                warehouses,
+                expiryLots
+            };
+
+            sendSuccess(res, details, "Item details fetched successfully");
+        } catch (err) {
+            console.error('Error fetching item details:', err);
+            sendError(res, "Item details not fetched successfully", err.statusCode || 500);
+        }
+    }
+
+    static async getItemHistory(req, res) {
+        try {
+            const itemCode = req.params.itemCode;
+            const company = req.query.company || 'GMS';
+            const startDate = req.query.startDate;
+            const endDate = req.query.endDate;
+
+            if (!itemCode) {
+                return sendError(res, "ItemCode is required", 400);
+            }
+
+            const filters = {};
+            if (startDate && endDate) {
+                filters.startDate = startDate;
+                filters.endDate = endDate;
+            }
+
+            const historyData = await inventoryModel.getItemHistory(itemCode, company, filters);
+            sendSuccess(res, historyData, "Item history fetched successfully");
+        } catch (err) {
+            console.error('Error fetching item history:', err);
+            sendError(res, "Item history not fetched successfully", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // GOODS RECEIPT
+    // ═══════════════════════════════════════════════════════════
+
+    static async createGoodsReceipt(req, res) {
+        let payload = null;
+        try {
+            const { company, docDate, postingDate, lines, remarks, journalRemark, branchId } = req.body;
+
+            // Validation
+            if (!company || !['GMS', 'LDS'].includes(company)) {
+                return sendError(res, "Company must be 'GMS' or 'LDS'", 400);
+            }
+            if (!docDate) {
+                return sendError(res, "DocDate is required", 400);
+            }
+            if (!lines || !Array.isArray(lines) || lines.length === 0) {
+                return sendError(res, "At least one line item is required", 400);
+            }
+
+            const todayDate = new Date().toISOString().split('T')[0];
+
+            payload = {
+                CompanyDB: company === 'GMS' ? 'Z_Dummy_GMS_Live' : 'Z_Dummy_LDS_Live',
+                DocDate: docDate,
+                Comments: remarks || '',
+                JournalRemark: journalRemark || remarks || (company === 'GMS' ? 'GMS Goods Receipt' : 'LDS Goods Receipt'),
+                Lines: []
+            };
+
+            if (company === 'LDS') {
+                payload.BranchId = parseInt(branchId, 10) || 1;
+            }
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line.itemCode || !line.quantity || line.quantity <= 0 || !line.whsCode) {
+                    return sendError(res, `Line ${i + 1}: ItemCode, Quantity (>0), and WhsCode are required`, 400);
+                }
+
+                const linePayload = {
+                    ItemCode: line.itemCode,
+                    Quantity: parseInt(line.quantity, 10),
+                    WarehouseCode: line.whsCode,
+                    AccountCode: line.accountCode || '',
+                    BusinessSegment: line.businessSegment || '',
+                    BudgetCode: line.costCenter || ''
+                };
+
+                if (company === 'LDS') {
+                    linePayload.Price = parseFloat(line.unitPrice || line.price || 0);
+                }
+
+                if (line.batches && line.batches.length > 0) {
+                    linePayload.Batches = line.batches.map(b => ({
+                        BatchNumber: String(b.BatchNumber || b.batchNumber || b.BatchNum || ''),
+                        Quantity: parseInt(b.Quantity || b.quantity, 10),
+                        AdmissionDate: b.AdmissionDate || b.admissionDate || docDate || todayDate
+                    }));
+                } else if (line.serials && line.serials.length > 0) {
+                    linePayload.Serials = line.serials.map(s => ({
+                        SerialNumber: String(s.SerialNumber || s.serialNumber || s.SysSerial || ''),
+                        ManufacturerSerialNumber: String(s.ManufacturerSerialNumber || s.manufacturerSerialNumber || s.ManufSN || s.MfrSerialNo || ''),
+                        AdmissionDate: s.AdmissionDate || s.admissionDate || docDate || todayDate
+                    }));
+                }
+
+                payload.Lines.push(linePayload);
+            }
+
+            const sapResponse = await fetch('http://115.186.130.76:7206/api/GoodsReceipt/Create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const responseText = await sapResponse.text();
+            let result;
+            try {
+                result = JSON.parse(responseText);
+            } catch(e) {
+                throw new Error("Invalid JSON response from SAP Pipeline: " + responseText);
+            }
+
+            if (!sapResponse.ok) {
+                throw new Error(result.message || result.error || JSON.stringify(result));
+            }
+
+            const standardizedResult = {
+                ...result,
+                docEntry: result.DocEntry,
+                docNum: result.DocNum || result.DocEntry
+            };
+
+            // ── Audit Log ───────────────────────────────────────────
+            await logActivity({
+                req,
+                company,
+                moduleName: 'INVENTORY',
+                actionType: 'CREATE',
+                docType: 'GOODS_RECEIPT',
+                docNum: standardizedResult.docNum,
+                docEntry: standardizedResult.docEntry,
+                description: `Created Goods Receipt with ${lines.length} lines. ${remarks || ''}`.trim()
+            });
+
+            sendSuccess(res, standardizedResult, "Goods Receipt created successfully via SAP Pipeline", 201);
+        } catch (err) {
+            console.error("Goods Receipt Error:", err);
+            if (payload) {
+                console.error("Failed Payload:", JSON.stringify(payload, null, 2));
+            }
+            sendError(res, err.message || "Failed to create Goods Receipt", err.statusCode || 500);
+        }
+    }
+
+    static async getGoodsReceipts(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 20;
+            const offset = (page - 1) * limit;
+
+            const sortColumns = ['DocEntry', 'DocNum', 'DocDate', 'PostingDate', 'DocTotal', 'CreatedAt', 'CardName'];
+            const sortBy = sortColumns.includes(req.query.sortBy) ? req.query.sortBy : 'CreatedAt';
+            const sortOrder = (req.query.sortOrder && req.query.sortOrder.toUpperCase() === "ASC") ? "ASC" : "DESC";
+
+            const pagination = { limit, offset };
+            const sorting = { sortBy, sortOrder };
+            const filters = {
+                company: req.query.company || null,
+                status: req.query.status || null,
+                search: req.query.search || null
+            };
+
+            const result = await inventoryModel.getGoodsReceipts(pagination, sorting, filters);
+            sendSuccess(res, result, "Goods Receipts fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch Goods Receipts", err.statusCode || 500);
+        }
+    }
+
+    static async getGoodsReceiptById(req, res) {
+        try {
+            const docEntry = parseInt(req.params.docEntry, 10);
+            const company = req.query.company || null;
+            if (!docEntry) return sendError(res, "DocEntry is required", 400);
+
+            const result = await inventoryModel.getGoodsReceiptById(docEntry, company);
+            if (!result) return sendError(res, "Goods Receipt not found", 404);
+
+            sendSuccess(res, result, "Goods Receipt fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch Goods Receipt", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // GOODS ISSUE
+    // ═══════════════════════════════════════════════════════════
+
+    static async createGoodsIssue(req, res) {
+        let payload = null;
+        try {
+            const { company, docDate, postingDate, lines, remarks, branchId } = req.body;
+
+            if (!company || !['GMS', 'LDS'].includes(company)) {
+                return sendError(res, "Company must be 'GMS' or 'LDS'", 400);
+            }
+            if (!docDate) {
+                return sendError(res, "DocDate is required", 400);
+            }
+            if (!lines || !Array.isArray(lines) || lines.length === 0) {
+                return sendError(res, "At least one line item is required", 400);
+            }
+
+            payload = {
+                CompanyDB: company === 'GMS' ? 'Z_Dummy_GMS_Live' : 'Z_Dummy_LDS_Live',
+                DocDate: docDate,
+                Comments: remarks || '',
+                Lines: []
+            };
+
+            if (company === 'LDS') {
+                if (!branchId) return sendError(res, "BranchId is required for LDS", 400);
+                payload.BranchId = parseInt(branchId, 10);
+            }
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line.itemCode || !line.quantity || line.quantity <= 0 || !line.whsCode) {
+                    return sendError(res, `Line ${i + 1}: ItemCode, Quantity, and WhsCode are required`, 400);
+                }
+
+                const linePayload = {
+                    ItemCode: line.itemCode,
+                    Quantity: parseInt(line.quantity, 10),
+                    WarehouseCode: line.whsCode,
+                    AccountCode: line.accountCode || '',
+                    BudgetCode: line.costCenter || '',
+                    BusinessSegment: line.businessSegment || ''
+                };
+
+                if (line.batches && line.batches.length > 0) {
+                    linePayload.Batches = line.batches.map(b => ({
+                        BatchNumber: String(b.BatchNum || b.BatchNumber || b.batchNumber),
+                        Quantity: parseInt(b.Quantity || b.quantity, 10)
+                    }));
+                } else if (line.serials && line.serials.length > 0) {
+                    linePayload.Serials = line.serials.map(s => ({
+                        SerialNumber: String(s.SysSerial || s.SerialNumber || s.serialNumber)
+                    }));
+                }
+
+                payload.Lines.push(linePayload);
+            }
+
+            const sapResponse = await fetch('http://115.186.130.76:7206/api/goodsissue/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const responseText = await sapResponse.text();
+            let result;
+            try {
+                result = JSON.parse(responseText);
+            } catch(e) {
+                throw new Error("Invalid JSON response from SAP Pipeline: " + responseText);
+            }
+
+            if (!sapResponse.ok) {
+                throw new Error(result.message || result.error || JSON.stringify(result));
+            }
+
+            const standardizedResult = {
+                ...result,
+                docEntry: result.DocEntry,
+                docNum: result.DocNum || result.DocEntry
+            };
+
+            // ── Audit Log ───────────────────────────────────────────
+            await logActivity({
+                req,
+                company,
+                moduleName: 'INVENTORY',
+                actionType: 'CREATE',
+                docType: 'GOODS_ISSUE',
+                docNum: standardizedResult.docNum,
+                docEntry: standardizedResult.docEntry,
+                description: `Created Goods Issue with ${lines.length} lines. ${remarks || ''}`.trim()
+            });
+
+            sendSuccess(res, standardizedResult, "Goods Issue created successfully via SAP Pipeline", 201);
+        } catch (err) {
+            console.error("Goods Issue Error:", err);
+            if (payload) {
+                console.error("Failed Payload:", JSON.stringify(payload, null, 2));
+            }
+            sendError(res, err.message || "Failed to create Goods Issue", err.statusCode || 500);
+        }
+    }
+
+    static async getGoodsIssues(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 20;
+            const offset = (page - 1) * limit;
+
+            const sortColumns = ['DocEntry', 'DocNum', 'DocDate', 'PostingDate', 'DocTotal', 'CreatedAt'];
+            const sortBy = sortColumns.includes(req.query.sortBy) ? req.query.sortBy : 'CreatedAt';
+            const sortOrder = (req.query.sortOrder && req.query.sortOrder.toUpperCase() === "ASC") ? "ASC" : "DESC";
+
+            const pagination = { limit, offset };
+            const sorting = { sortBy, sortOrder };
+            const filters = {
+                company: req.query.company || null,
+                status: req.query.status || null,
+                search: req.query.search || null
+            };
+
+            const result = await inventoryModel.getGoodsIssues(pagination, sorting, filters);
+            sendSuccess(res, result, "Goods Issues fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch Goods Issues", err.statusCode || 500);
+        }
+    }
+
+    static async getGoodsIssueById(req, res) {
+        try {
+            const docEntry = parseInt(req.params.docEntry, 10);
+            const company = req.query.company || null;
+            if (!docEntry) return sendError(res, "DocEntry is required", 400);
+
+            const result = await inventoryModel.getGoodsIssueById(docEntry, company);
+            if (!result) return sendError(res, "Goods Issue not found", 404);
+
+            sendSuccess(res, result, "Goods Issue fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch Goods Issue", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // INVENTORY TRANSFER
+    // ═══════════════════════════════════════════════════════════
+
+    static async createInventoryTransfer(req, res) {
+        try {
+            if (!req.body.company || !req.body.fromWhs || !req.body.toWhs || !req.body.lines || req.body.lines.length === 0) {
+                return sendError(res, "Company, From Warehouse, To Warehouse, and Lines are required", 400);
+            }
+
+            for (let i = 0; i < req.body.lines.length; i++) {
+                const line = req.body.lines[i];
+                if (!line.itemCode || !line.quantity || line.quantity <= 0) {
+                    return sendError(res, `Line ${i + 1}: ItemCode and Quantity (>0) are required`, 400);
+                }
+            }
+
+            const userId = req.user?.empId || 0;
+            const result = await inventoryModel.createInventoryTransfer(req.body, userId);
+
+            // ── Audit Log ───────────────────────────────────────────
+            await logActivity({
+                req,
+                company: req.body.company,
+                moduleName: 'INVENTORY',
+                actionType: 'CREATE',
+                docType: 'INVENTORY_TRANSFER',
+                docNum: result?.DocNum || result?.docNum || null,
+                docEntry: result?.DocEntry || result?.docEntry || null,
+                description: `Created Inventory Transfer from WH ${req.body.fromWhs} to WH ${req.body.toWhs} (${req.body.lines?.length || 0} lines)`
+            });
+
+            sendSuccess(res, result, "Inventory Transfer created successfully", 201);
+        } catch (err) {
+            sendError(res, err.message || "Failed to create Inventory Transfer", err.statusCode || 500);
+        }
+    }
+
+    static async getInventoryTransfers(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 20;
+            const offset = (page - 1) * limit;
+
+            const sortColumns = ['DocEntry', 'DocNum', 'DocDate', 'TaxDate'];
+            const sortBy = sortColumns.includes(req.query.sortBy) ? req.query.sortBy : 'DocEntry';
+            const sortOrder = (req.query.sortOrder && req.query.sortOrder.toUpperCase() === "ASC") ? "ASC" : "DESC";
+
+            const pagination = { limit, offset };
+            const sorting = { sortBy, sortOrder };
+            const filters = {
+                company: req.query.company || null,
+                search: req.query.search || null
+            };
+
+            const result = await inventoryModel.getInventoryTransfers(pagination, sorting, filters);
+            sendSuccess(res, result, "Inventory Transfers fetched successfully");
+        } catch (err) {
+            console.error("Transfers error: ", err);
+            sendError(res, "Failed to fetch Inventory Transfers", err.statusCode || 500);
+        }
+    }
+
+    static async getInventoryTransferById(req, res) {
+        try {
+            const docEntry = parseInt(req.params.docEntry, 10);
+            const company = req.query.company || null;
+            if (!docEntry) return sendError(res, "DocEntry is required", 400);
+
+            const result = await inventoryModel.getInventoryTransferById(docEntry, company);
+            if (!result) return sendError(res, "Inventory Transfer not found", 404);
+
+            sendSuccess(res, result, "Inventory Transfer fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch Inventory Transfer", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // DELIVERY CHALLAN
+    // ═══════════════════════════════════════════════════════════
+
+    static async getDeliveryChallans(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 20;
+            const offset = (page - 1) * limit;
+
+            const sortColumns = ['DocEntry', 'DocNum', 'DocDate', 'CreatedAt', 'CardName'];
+            const sortBy = sortColumns.includes(req.query.sortBy) ? req.query.sortBy : 'DocEntry';
+            const sortOrder = (req.query.sortOrder && req.query.sortOrder.toUpperCase() === "ASC") ? "ASC" : "DESC";
+
+            const pagination = { limit, offset };
+            const sorting = { sortBy, sortOrder };
+            const filters = {
+                company: req.query.company || null,
+                search: req.query.search || null
+            };
+
+            const result = await inventoryModel.getDeliveryChallans(pagination, sorting, filters);
+            sendSuccess(res, result, "Delivery Challans fetched successfully");
+        } catch (err) {
+            console.error("Delivery Challans error: ", err);
+            sendError(res, "Failed to fetch Delivery Challans", err.statusCode || 500);
+        }
+    }
+
+    static async getDeliveryChallanById(req, res) {
+        try {
+            const docEntry = parseInt(req.params.docEntry, 10);
+            const company = req.query.company || null;
+            if (!docEntry) return sendError(res, "DocEntry is required", 400);
+
+            const result = await inventoryModel.getDeliveryChallanById(docEntry, company);
+            if (!result) return sendError(res, "Delivery Challan not found", 404);
+
+            sendSuccess(res, result, "Delivery Challan fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch Delivery Challan details", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // INCIDENT REPORTING
+    // ═══════════════════════════════════════════════════════════
+
+    static async getIncidentReports(req, res) {
+        try {
+            const result = await inventoryModel.getIncidentReports();
+            sendSuccess(res, result, "Incident reports fetched successfully");
+        } catch (err) {
+            console.error("Incident reports error:", err);
+            sendError(res, "Failed to fetch incident reports", err.statusCode || 500);
+        }
+    }
+
+    static async createIncidentReport(req, res) {
+        try {
+            const data = req.body;
+            const result = await inventoryModel.createIncidentReport(data);
+
+            // ── Audit Log ───────────────────────────────────────────
+            await logActivity({
+                req,
+                moduleName: 'INVENTORY',
+                actionType: 'CREATE',
+                docType: 'INCIDENT_REPORT',
+                docEntry: result?.id || null,
+                description: `Created Incident Report: ${data.IncidentType || ''} at ${data.Location || ''}`.trim()
+            });
+
+            sendSuccess(res, { id: result.id }, "Incident report created successfully", 201);
+        } catch (err) {
+            console.error("Create incident report error:", err);
+            sendError(res, "Failed to create incident report", err.statusCode || 500);
+        }
+    }
+
+    static async getUserInfo(req, res) {
+        try {
+            const empId = req.query.empId;
+            if (!empId) return sendError(res, "empId is required", 400);
+
+            const result = await inventoryModel.getUserInfo(empId);
+            sendSuccess(res, result, "User info fetched successfully");
+        } catch (err) {
+            console.error("User info error:", err);
+            sendError(res, "Failed to fetch user info", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // TRAINING CALENDAR
+    // ═══════════════════════════════════════════════════════════
+
+    static async getTrainings(req, res) {
+        try {
+            const result = await inventoryModel.getTrainings();
+            sendSuccess(res, result, "Trainings fetched successfully");
+        } catch (err) {
+            console.error("Trainings error:", err);
+            sendError(res, "Failed to fetch trainings", err.statusCode || 500);
+        }
+    }
+
+    static async createTraining(req, res) {
+        try {
+            const data = req.body;
+            const result = await inventoryModel.createTraining(data);
+
+            // ── Audit Log ───────────────────────────────────────────
+            await logActivity({
+                req,
+                moduleName: 'INVENTORY',
+                actionType: 'CREATE',
+                docType: 'TRAINING',
+                docEntry: result?.id || null,
+                description: `Created Training session: ${data.Title || ''} (${data.Category || ''})`.trim()
+            });
+
+            sendSuccess(res, { id: result.id }, "Training session created successfully", 201);
+        } catch (err) {
+            console.error("Create training error:", err);
+            sendError(res, "Failed to create training session", err.statusCode || 500);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // LOOKUPS — For CFL modals
+    // ═══════════════════════════════════════════════════════════
+
+    static async lookupVendors(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 20;
+            const offset = (page - 1) * limit;
+
+            const result = await inventoryModel.lookupVendors(
+                req.query.company || null,
+                req.query.search || null,
+                { limit, offset }
+            );
+            sendSuccess(res, result, "Vendors fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch vendors", err.statusCode || 500);
+        }
+    }
+
+    static async lookupWarehouses(req, res) {
+        try {
+            const result = await inventoryModel.lookupWarehouses(
+                req.query.company || null,
+                req.query.search || null
+            );
+            sendSuccess(res, result, "Warehouses fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch warehouses", err.statusCode || 500);
+        }
+    }
+
+    static async lookupAccounts(req, res) {
+        try {
+            const result = await inventoryModel.lookupAccounts(
+                req.query.company || null,
+                req.query.search || null
+            );
+            sendSuccess(res, result, "Accounts fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch accounts", err.statusCode || 500);
+        }
+    }
+
+    static async lookupBranches(req, res) {
+        try {
+            const result = await inventoryModel.lookupBranches();
+            sendSuccess(res, result, "Branches fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch branches", err.statusCode || 500);
+        }
+    }
+
+    static async lookupBusinessSegments(req, res) {
+        try {
+            const result = await inventoryModel.lookupBusinessSegments(
+                req.query.company || null
+            );
+            sendSuccess(res, result, "Business segments fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch business segments", err.statusCode || 500);
+        }
+    }
+
+    static async lookupCostCenters(req, res) {
+        try {
+            const result = await inventoryModel.lookupCostCenters(
+                req.query.company || null
+            );
+            sendSuccess(res, result, "Cost centers fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch cost centers", err.statusCode || 500);
+        }
+    }
+
+    static async getNextDocNum(req, res) {
+        try {
+            const type = req.query.type || 'goods-receipt';
+            const company = req.query.company || 'GMS';
+            const nextDocNum = await inventoryModel.getNextDocNum(type, company);
+            sendSuccess(res, { nextDocNum }, "Next DocNum fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch next DocNum", err.statusCode || 500);
+        }
+    }
+    static async lookupBatches(req, res) {
+        try {
+            const company = req.query.company || null;
+            const itemCode = req.query.itemCode;
+            const whsCode = req.query.whsCode;
+
+            if (!itemCode) {
+                return sendError(res, "ItemCode is required", 400);
+            }
+
+            const result = await inventoryModel.lookupBatches(company, itemCode, whsCode);
+            sendSuccess(res, result, "Batches fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch batches", err.statusCode || 500);
+        }
+    }
+
+    static async lookupSerials(req, res) {
+        try {
+            const company = req.query.company || null;
+            const itemCode = req.query.itemCode;
+            const whsCode = req.query.whsCode;
+
+            if (!itemCode) {
+                return sendError(res, "ItemCode is required", 400);
+            }
+
+            const result = await inventoryModel.lookupSerials(company, itemCode, whsCode);
+            sendSuccess(res, result, "Serials fetched successfully");
+        } catch (err) {
+            console.error("lookupSerials error:", err);
+            sendError(res, err.message || "Failed to fetch serials", err.statusCode || 500);
+        }
+    }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// GET /api/inventory/filters
-// Filter options: warehouses, item groups, categories
-// ═══════════════════════════════════════════════════════════════════════════════
-async function getFilterOptions(req, res) {
-  try {
-    const pool = await poolPromise;
-
-    const [warehouseRes, groupRes, categoryRes, divisionRes] = await Promise.all([
-      pool.request().query(`SELECT WhsCode AS value, WhsName AS label FROM LDS_LIVE.dbo.OWHS ORDER BY WhsCode`),
-      pool.request().query(`SELECT ItmsGrpCod AS value, ItmsGrpNam AS label FROM LDS_LIVE.dbo.OITB ORDER BY ItmsGrpNam`),
-      pool.request().query(`SELECT DISTINCT U_cat1 AS value, U_cat1 AS label FROM LDS_LIVE.dbo.OITM WHERE U_cat1 IS NOT NULL AND U_cat1 <> '' ORDER BY U_cat1`),
-      pool.request().query(`SELECT DISTINCT U_Division AS value, U_Division AS label FROM LDS_LIVE.dbo.OITM WHERE U_Division IS NOT NULL AND U_Division <> '' ORDER BY U_Division`),
-    ]);
-
-    return res.json({
-      success: true,
-      data: {
-        warehouses: warehouseRes.recordset,
-        itemGroups: groupRes.recordset,
-        categories: categoryRes.recordset,
-        divisions: divisionRes.recordset,
-      },
-    });
-  } catch (error) {
-    console.error("Filter options error:", error);
-    return res.status(500).json({ success: false, message: "Unable to retrieve filter options" });
-  }
-}
-
-module.exports = {
-  getSummary,
-  getCurrentStock,
-  getWarehouseSummary,
-  getItemGroupSummary,
-  getMovements,
-  getExpiry,
-  getBatches,
-  getPurchasePipeline,
-  getCommitments,
-  getProductionDemand,
-  getItemDetail,
-  getFilterOptions,
-};
+module.exports = InventoryController;
