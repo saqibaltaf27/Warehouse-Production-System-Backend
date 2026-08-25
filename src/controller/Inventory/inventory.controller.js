@@ -665,7 +665,22 @@ class InventoryController {
 
     // ═══════════════════════════════════════════════════════════
     // LOOKUPS — For CFL modals
-    // ═══════════════════════════════════════════════════════════
+    static async lookupItems(req, res) {
+        try {
+            const page = parseInt(req.query.page, 10) || 1;
+            const limit = parseInt(req.query.limit, 10) || 50;
+            const offset = (page - 1) * limit;
+
+            const result = await inventoryModel.lookupItems(
+                req.query.company || null,
+                req.query.search || null,
+                { limit, offset }
+            );
+            sendSuccess(res, result, "Items fetched successfully");
+        } catch (err) {
+            sendError(res, "Failed to fetch items", err.statusCode || 500);
+        }
+    }
 
     static async lookupVendors(req, res) {
         try {
