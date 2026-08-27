@@ -1647,6 +1647,41 @@ class InventoryModel {
         const result = await request.query(queries.join(" UNION ALL ") + " ORDER BY ExpDate ASC, SysSerial ASC;");
         return result.recordset || [];
     }
+    static async lookupItems(company, search, pagination) {
+        const pool = await poolPromise;
+        const request = pool.request();
+        
+        let searchSql = "";
+        if (search) {
+            searchSql = ` AND (ItemCode LIKE @search OR ItemName LIKE @search OR FrgnName LIKE @search OR CodeBars LIKE @search) `;
+            request.input('search', sql.VarChar, `%${search}%`);
+        }
+
+        request.input('limit', sql.Int, pagination.limit);
+        request.input('offset', sql.Int, pagination.offset);
+
+        let queries = [];
+        if (!company || company === 'GMS') {
+            queries.push(`
+                SELECT 'GMS' AS Company, ItemCode, ItemName, ISNULL(U_Cat1, '') AS U_Cat1 
+                FROM gms_live.dbo.OITM 
+                WHERE FrozenFor = 'N' ${searchSql}
+            `);
+        }
+        if (!company || company === 'LDS') {
+            queries.push(`
+                SELECT 'LDS' AS Company, ItemCode, ItemName, ISNULL(U_Cat1, '') AS U_Cat1 
+                FROM lds_live.dbo.OITM 
+                WHERE FrozenFor = 'N' ${searchSql}
+            `);
+        }
+
+        let finalQuery = queries.join(" UNION ALL ");
+        finalQuery += ` ORDER BY ItemCode ASC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;`;
+
+        const result = await request.query(finalQuery);
+        return result.recordset || [];
+    }
 
     static async getItemExpiryLots(itemCode, company) {
         const pool = await poolPromise;
