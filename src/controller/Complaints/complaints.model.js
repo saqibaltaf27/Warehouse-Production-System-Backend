@@ -15,20 +15,11 @@ class ComplaintsModel {
         request.input('offset', sql.Int, pagination.offset);
 
         let queries = [];
-        if (!company || company === 'GMS') {
-            queries.push(`
-                SELECT 'GMS' AS Company, ItemCode, ItemName, ISNULL(U_Cat1, '') AS U_Cat1, '' AS U_Prod_line 
-                FROM gms_live.dbo.OITM 
-                WHERE FrozenFor = 'N' ${searchSql}
-            `);
-        }
-        if (!company || company === 'LDS') {
-            queries.push(`
-                SELECT 'LDS' AS Company, ItemCode, ItemName, ISNULL(U_Cat1, '') AS U_Cat1, ISNULL(U_Prod_line, '') AS U_Prod_line 
-                FROM lds_live.dbo.OITM 
-                WHERE FrozenFor = 'N' ${searchSql}
-            `);
-        }
+        queries.push(`
+            SELECT 'LDS' AS Company, ItemCode, ItemName, ISNULL(U_Cat1, '') AS U_Cat1, ISNULL(U_Prod_line, '') AS U_Prod_line 
+            FROM lds_live.dbo.OITM 
+            WHERE FrozenFor = 'N' AND ItemCode LIKE 'FG%' ${searchSql}
+        `);
 
         let finalQuery = queries.join(" UNION ALL ");
         finalQuery += ` ORDER BY ItemCode ASC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;`;
