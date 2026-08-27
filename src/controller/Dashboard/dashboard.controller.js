@@ -2,18 +2,18 @@ const { sql, poolPromise } = require('../../database/connection');
 
 // Helper for filtering
 function buildWhereClause(query, request, tableAlias = 'p') {
-  const { dateFrom, dateTo, warehouse } = query;
+  const { startDate, endDate, warehouse } = query;
   let conditions = [];
 
-  if (dateFrom) {
-    conditions.push(`${tableAlias}.PostDate >= @dateFrom`);
-    request.input('dateFrom', sql.DateTime, new Date(dateFrom));
+  if (startDate) {
+    conditions.push(`${tableAlias}.PostDate >= @startDate`);
+    request.input('startDate', sql.DateTime, new Date(startDate));
   }
-  if (dateTo) {
-    conditions.push(`${tableAlias}.PostDate <= @dateTo`);
-    request.input('dateTo', sql.DateTime, new Date(dateTo));
+  if (endDate) {
+    conditions.push(`${tableAlias}.PostDate <= @endDate`);
+    request.input('endDate', sql.DateTime, new Date(endDate));
   }
-  if (warehouse) {
+  if (warehouse && warehouse !== 'All') {
     conditions.push(`${tableAlias}.Warehouse = @warehouse`);
     request.input('warehouse', sql.NVarChar, warehouse);
   }
@@ -26,264 +26,466 @@ exports.getOverviewData = async (req, res) => {
     const pool = await poolPromise;
     const request = pool.request();
     
-    // Parse global filters
-    const whereClause = buildWhereClause(req.query, request, 'o');
-    const invWhere = req.query.warehouse ? `AND iw.WhsCode = '${req.query.warehouse}'` : '';
+    // Add parameters to request
+    const { startDate, endDate, warehouse } = req.query;
+    if (startDate) request.input('startDate', sql.DateTime, new Date(startDate));
+    if (endDate) request.input('endDate', sql.DateTime, new Date(endDate));
+    if (warehouse && warehouse !== 'All') request.input('warehouse', sql.NVarChar, warehouse);
+
+    const planWhere = [];
+    const actualWhere = [];
+
+    if (startDate) planWhere.push("o.PostDate >= @startDate");
+    if (endDate) planWhere.push("o.PostDate <= @endDate");
+    if (warehouse && warehouse !== 'All') planWhere.push("o.Warehouse = @warehouse");
+
+    if (startDate) actualWhere.push("i.DocDate >= @startDate");
+    if (endDate) actualWhere.push("i.DocDate <= @endDate");
+    if (warehouse && warehouse !== 'All') actualWhere.push("i.WhsCode = @warehouse");
+
+    const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
+    const actualCond = actualWhere.length > 0 ? ' AND ' + actualWhere.join(' AND ') : '';
+
+    const query = `
+      SELECT 
+        (SELECT ISNULL(SUM(o.PlannedQty), 0) FROM LDS_LIVE.dbo.OWOR o WHERE o.Status IN ('R', 'P', 'L', 'C') ${planCond}) as PlannedQty,
+        (SELECT ISNULL(SUM(i.Quantity), 0) FROM LDS_LIVE.dbo.IGN1 i WHERE i.BaseType = 202 ${actualCond}) as ActualQty,
+        (SELECT COUNT(o.DocEntry) FROM LDS_LIVE.dbo.OWOR o WHERE o.Status IN ('R', 'P', 'L', 'C') ${planCond}) as TotalOrders
+    `;
+
+    const result = await request.query(query);
+    const data = result.recordset[0] || { PlannedQty: 0, ActualQty: 0, TotalOrders: 0 };
     
-    // 1. Executive KPIs (Production & Cost)
-    const kpiQuery = `
-      SELECT 
-        COUNT(o.DocEntry) as TotalOrders,
-        SUM(CASE WHEN o.Status = 'R' THEN 1 ELSE 0 END) as ActiveOrders,
-        SUM(CASE WHEN o.Status = 'P' THEN 1 ELSE 0 END) as PlannedOrders,
-        SUM(CASE WHEN o.Status = 'C' THEN 1 ELSE 0 END) as CancelledOrders,
-        SUM(CASE WHEN o.Status = 'L' THEN 1 ELSE 0 END) as ClosedOrders,
-        SUM(CASE WHEN o.Status IN ('R', 'P') AND o.DueDate < CAST(GETDATE() AS DATE) AND o.CmpltQty < o.PlannedQty THEN 1 ELSE 0 END) as DelayedOrders,
-        ISNULL(SUM(CASE WHEN o.Status IN ('R', 'P', 'L') THEN o.PlannedQty ELSE 0 END), 0) as TotalPlannedQty,
-        ISNULL((SELECT SUM(Quantity) FROM LDS_LIVE.dbo.IGN1 WHERE BaseType = 202 ${whereClause.replace('o.', '')}), 0) as TotalActualQty
-        -- ISNULL((SELECT SUM(LineTotal) FROM LDS_LIVE.dbo.IGE1 WHERE BaseType = 202 ${whereClause.replace('o.', '')}), 0) as TotalActualCost
-      FROM LDS_LIVE.dbo.OWOR o
-      WHERE o.Status IN ('R', 'P', 'L', 'C') ${whereClause}
-    `;
-
-    // 2. Inventory Health KPIs
-    const invKpiQuery = `
-      SELECT
-        -- ISNULL(SUM(iw.OnHand * CASE WHEN m.AvgPrice > 0 THEN m.AvgPrice ELSE 0 END), 0) AS TotalInventoryValue,
-        COUNT(DISTINCT CASE WHEN iw.OnHand <= 0 THEN iw.ItemCode END) AS OutOfStockItems,
-        COUNT(DISTINCT CASE WHEN iw.MinStock > 0 AND (iw.OnHand - iw.IsCommited) < iw.MinStock THEN iw.ItemCode END) AS CriticalItems
-      FROM LDS_LIVE.dbo.OITW iw
-      INNER JOIN LDS_LIVE.dbo.OITM m ON iw.ItemCode = m.ItemCode
-      WHERE (iw.OnHand <> 0 OR iw.IsCommited <> 0 OR iw.OnOrder <> 0) ${invWhere}
-    `;
-
-    // 3. Machine Efficiency (Global Avg)
-    const machineQuery = `
-      SELECT 
-          ISNULL((SELECT SUM(Capacity) FROM LDS_LIVE.dbo.ORCJ WHERE CapType = 'C'), 0) AS AvailableHrs,
-          ISNULL(SUM(mo.ConsumedMachineHrs), 0) AS ConsumedHrs
-      FROM LDS_LIVE.dbo.ORSC m
-      LEFT JOIN (
-          SELECT r.ItemCode AS Machine, SUM(r.IssuedQty) AS ConsumedMachineHrs
-          FROM LDS_LIVE.dbo.WOR1 r
-          INNER JOIN LDS_LIVE.dbo.OWOR p ON r.DocEntry = p.DocEntry
-          WHERE r.ItemType = 290 AND p.Status IN ('R', 'L')
-          GROUP BY r.ItemCode
-      ) mo ON m.ResCode = mo.Machine
-      WHERE m.ResType = 'O'
-    `;
-
-    // 4. Production Performance (Trend Chart - Last 6 Months)
-    const trendQuery = `
-      SELECT 
-        YEAR(o.PostDate) as Year,
-        MONTH(o.PostDate) as Month,
-        COUNT(o.DocEntry) as OrderCount,
-        SUM(o.PlannedQty) as PlannedQty
-      FROM LDS_LIVE.dbo.OWOR o
-      WHERE o.PostDate >= DATEADD(month, -6, GETDATE())
-      GROUP BY YEAR(o.PostDate), MONTH(o.PostDate)
-      ORDER BY Year, Month
-    `;
-
-    // 5. Recent Production Orders (Top 5)
-    const recentOrdersQuery = `
-      SELECT TOP 5
-        o.DocNum,
-        o.ItemCode as ProductCode,
-        i.ItemName as ProductName,
-        o.Status,
-        o.PlannedQty,
-        ISNULL((SELECT SUM(Quantity) FROM LDS_LIVE.dbo.IGN1 WHERE BaseEntry = o.DocEntry AND BaseType = 202), 0) as ActualQty,
-        o.PostDate,
-        o.DueDate
-      FROM LDS_LIVE.dbo.OWOR o
-      LEFT JOIN LDS_LIVE.dbo.OITM i ON o.ItemCode = i.ItemCode
-      ORDER BY o.DocNum DESC
-    `;
-
-    // 6. Open Orders Details
-    const openOrdersQuery = `
-      SELECT
-        o.DocNum,
-        i.ItemName as ProductName,
-        o.Status,
-        o.PlannedQty,
-        ISNULL((SELECT SUM(Quantity) FROM LDS_LIVE.dbo.IGN1 WHERE BaseEntry = o.DocEntry AND BaseType = 202), 0) as ActualQty,
-        o.DueDate
-      FROM LDS_LIVE.dbo.OWOR o
-      LEFT JOIN LDS_LIVE.dbo.OITM i ON o.ItemCode = i.ItemCode
-      WHERE o.Status IN ('P', 'R') ${whereClause}
-      ORDER BY o.DueDate ASC
-    `;
-
-    // Run all queries concurrently
-    const [
-      kpiResult,
-      invKpiResult,
-      machineResult,
-      trendResult,
-      recentOrdersResult,
-      openOrdersDetailsResult,
-      expiryResult
-    ] = await Promise.all([
-      request.query(kpiQuery),
-      pool.request().query(invKpiQuery), // separate request for separate parameters/scope
-      pool.request().query(machineQuery),
-      pool.request().query(trendQuery),
-      pool.request().query(recentOrdersQuery),
-      request.query(openOrdersQuery),
-      pool.request().query(`
-        SELECT
-          COUNT(DISTINCT CASE WHEN b.ExpDate IS NOT NULL AND b.ExpDate >= GETDATE() AND b.ExpDate <= DATEADD(DAY, 30, GETDATE()) THEN CONCAT(b.ItemCode, '-', b.DistNumber) END) AS Expiring30Days,
-          COUNT(DISTINCT CASE WHEN b.ExpDate IS NOT NULL AND b.ExpDate > DATEADD(DAY, 30, GETDATE()) AND b.ExpDate <= DATEADD(DAY, 90, GETDATE()) THEN CONCAT(b.ItemCode, '-', b.DistNumber) END) AS Expiring90Days
-        FROM LDS_LIVE.dbo.OBTN b
-        INNER JOIN LDS_LIVE.dbo.OBTQ q ON b.ItemCode = q.ItemCode AND b.SysNumber = q.SysNumber
-        WHERE q.Quantity > 0 ${req.query.warehouse ? `AND q.WhsCode = '${req.query.warehouse}'` : ''}
-      `)
-    ]);
-
-    // Process and shape the data
-    const kpiData = kpiResult.recordset[0] || {};
-    const invData = invKpiResult.recordset[0] || {};
-    const machData = machineResult.recordset[0] || {};
-    const expiryData = expiryResult.recordset[0] || {};
-
-    const efficiencyPercent = kpiData.TotalPlannedQty > 0 ? (kpiData.TotalActualQty / kpiData.TotalPlannedQty) * 100 : 0;
-    const machineUtilization = machData.AvailableHrs > 0 ? (machData.ConsumedHrs / machData.AvailableHrs) * 100 : (machData.ConsumedHrs > 0 ? 100 : 0);
-
-    const dashboardResponse = {
-      executiveKPIs: {
-        totalOrders: kpiData.TotalOrders || 0,
-        activeOrders: kpiData.ActiveOrders || 0,
-        // totalInventoryValue: invData.TotalInventoryValue || 0,
-        machineUtilization: parseFloat(machineUtilization).toFixed(1),
-        yieldPercent: parseFloat(efficiencyPercent).toFixed(1),
-        outOfStockItems: invData.OutOfStockItems || 0,
-        delayedOrders: kpiData.DelayedOrders || 0,
-        cancelledOrders: kpiData.CancelledOrders || 0,
-        plannedOrders: kpiData.PlannedOrders || 0,
-        closedOrders: kpiData.ClosedOrders || 0
-        // totalActualCost: kpiData.TotalActualCost || 0
-      },
-      productionPerformance: trendResult.recordset,
-      inventoryHealth: {
-        critical: invData.CriticalItems || 0,
-        outOfStock: invData.OutOfStockItems || 0,
-        expiring30Days: expiryData.Expiring30Days || 0,
-        expiring90Days: expiryData.Expiring90Days || 0
-      },
-      recentOrders: recentOrdersResult.recordset,
-      // productionMix: mixResult.recordset,
-      openOrdersDetails: openOrdersDetailsResult.recordset,
-      alerts: [
-        ...(invData.OutOfStockItems > 0 ? [{ id: 1, type: 'critical', title: 'Out of Stock', description: `${invData.OutOfStockItems} items are currently out of stock.` }] : []),
-        ...(invData.CriticalItems > 0 ? [{ id: 2, type: 'warning', title: 'Critical Stock Level', description: `${invData.CriticalItems} items have fallen below minimum stock levels.` }] : []),
-        ...(machineUtilization < 50 ? [{ id: 3, type: 'warning', title: 'Low Machine Utilization', description: 'Overall machine utilization is below 50%.' }] : []),
-        ...(expiryData.Expiring30Days > 0 ? [{ id: 4, type: 'warning', title: 'Expiring Batches', description: `${expiryData.Expiring30Days} batches are expiring within 30 days.` }] : [])
-      ]
-    };
+    // Achievement
+    const achievement = data.PlannedQty > 0 ? (data.ActualQty / data.PlannedQty) * 100 : 0;
 
     res.status(200).json({
       success: true,
-      data: dashboardResponse
+      data: {
+        plan: data.PlannedQty,
+        actual: data.ActualQty,
+        achievement: achievement.toFixed(2),
+        totalOrders: data.TotalOrders
+      }
     });
-
   } catch (error) {
     console.error("Error generating dashboard overview:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-exports.getFilteredOrders = async (req, res) => {
-  try {
-    const { status = 'All', tableDateFilter = 'today', volumeDateFilter = 'yearly', warehouse } = req.query;
-    const pool = await poolPromise;
-    const request = pool.request();
+exports.getAlerts = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        const whereClause = buildWhereClause(req.query, request, 'o');
+        const finalWhere = whereClause ? `AND ${whereClause.substring(4)}` : '';
 
-    // Helper function to build date conditions
-    const buildDateCondition = (filter, prefix) => {
-      if (filter === 'today') return `${prefix}.PostDate >= CAST(GETDATE() AS DATE)`;
-      if (filter === 'weekly') return `${prefix}.PostDate >= DATEADD(day, -7, CAST(GETDATE() AS DATE))`;
-      if (filter === 'monthly') return `${prefix}.PostDate >= DATEADD(month, -1, CAST(GETDATE() AS DATE))`;
-      if (filter === 'yearly') return `${prefix}.PostDate >= DATEADD(year, -1, CAST(GETDATE() AS DATE))`;
-      return '1=1';
-    };
+        // 1. Orders Delayed
+        const delayedQuery = `
+            SELECT COUNT(o.DocEntry) as Count
+            FROM LDS_LIVE.dbo.OWOR o
+            WHERE o.Status IN ('R', 'P') AND o.DueDate < CAST(GETDATE() AS DATE) AND o.CmpltQty < o.PlannedQty ${finalWhere}
+        `;
+        const delayedResult = await request.query(delayedQuery);
+        
+        // 2. Material Shortage
+        const warehouseFilter = req.query.warehouse && req.query.warehouse !== 'All' ? `AND w.WhsCode = @warehouse` : '';
+        const shortageQuery = `
+             SELECT COUNT(*) as Count FROM (
+                 SELECT m.ItemCode
+                 FROM LDS_LIVE.dbo.OITW w
+                 INNER JOIN LDS_LIVE.dbo.OITM m ON w.ItemCode = m.ItemCode
+                 WHERE 1=1 ${warehouseFilter}
+                 GROUP BY m.ItemCode
+                 HAVING SUM(w.OnHand) < SUM(w.IsCommited)
+             ) t
+        `;
+        const shortageResult = await request.query(shortageQuery);
 
-    // 1. Build Date Filter for the Orders List
-    let tableDateCondition = buildDateCondition(tableDateFilter, 'o');
+        // 3. Orders Over Standard Cost (Variance > 5%)
+        const costQuery = `
+             SELECT COUNT(*) as Count
+             FROM (
+                 SELECT 
+                     o.DocEntry,
+                     ISNULL((SELECT SUM(w.PlannedQty * m.AvgPrice) FROM LDS_LIVE.dbo.WOR1 w INNER JOIN LDS_LIVE.dbo.OITM m ON w.ItemCode = m.ItemCode WHERE w.DocEntry = o.DocEntry), 0) as StdCost,
+                     ISNULL((SELECT SUM(i.LineTotal) FROM LDS_LIVE.dbo.IGE1 i WHERE i.BaseEntry = o.DocEntry AND i.BaseType = 202), 0) as ActualCost
+                 FROM LDS_LIVE.dbo.OWOR o
+                 WHERE o.Status IN ('L', 'C') ${finalWhere}
+             ) t
+             WHERE t.StdCost > 0 AND ((t.ActualCost - t.StdCost) / t.StdCost) > 0.05
+        `;
+        const costResult = await request.query(costQuery);
+        
+        // 4. Quality Issues
+        const qualityQuery = `
+            SELECT COUNT(o.DocEntry) as Count
+            FROM LDS_LIVE.dbo.OWOR o
+            WHERE o.Status IN ('R', 'L', 'P', 'C') AND o.RjctQty > 0 ${finalWhere}
+        `;
+        const qualityResult = await request.query(qualityQuery);
 
-    // 2. Build Status Filter for the Orders List
-    let statusCondition = '';
-    if (status === 'Delayed') {
-      statusCondition = "o.Status IN ('P', 'R') AND o.DueDate < CAST(GETDATE() AS DATE) AND o.CmpltQty < o.PlannedQty";
-    } else if (status !== 'All') {
-      statusCondition = "o.Status = @status";
-      request.input('status', sql.NVarChar, status);
-    } else {
-      statusCondition = "o.Status IN ('R', 'L', 'C', 'P')";
+
+        res.status(200).json({
+            success: true,
+            data: {
+                delayedOrders: delayedResult.recordset[0]?.Count || 0,
+                materialShortages: shortageResult.recordset[0]?.Count || 0,
+                ordersOverCost: costResult.recordset[0]?.Count || 0,
+                highDowntime: 0, // Unavailable
+                qualityIssues: qualityResult.recordset[0]?.Count || 0
+            }
+        });
+    } catch (error) {
+        console.error("Error generating alerts:", error);
+        res.status(500).json({ success: false, message: error.message });
     }
+};
 
-    // 3. Build Warehouse Filter
-    let whsCondition = '';
-    if (warehouse) {
-      whsCondition = "o.Warehouse = @warehouse";
-      request.input('warehouse', sql.NVarChar, warehouse);
+exports.getPlanVsActual = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        
+        const { startDate, endDate, warehouse } = req.query;
+        if (startDate) request.input('startDate', sql.DateTime, new Date(startDate));
+        if (endDate) request.input('endDate', sql.DateTime, new Date(endDate));
+        if (warehouse && warehouse !== 'All') request.input('warehouse', sql.NVarChar, warehouse);
+
+        const planWhere = [];
+        const actualWhere = [];
+
+        if (startDate) planWhere.push("PostDate >= @startDate");
+        if (endDate) planWhere.push("PostDate <= @endDate");
+        if (warehouse && warehouse !== 'All') planWhere.push("Warehouse = @warehouse");
+
+        if (startDate) actualWhere.push("DocDate >= @startDate");
+        if (endDate) actualWhere.push("DocDate <= @endDate");
+        if (warehouse && warehouse !== 'All') actualWhere.push("WhsCode = @warehouse");
+
+        const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
+        const actualCond = actualWhere.length > 0 ? ' AND ' + actualWhere.join(' AND ') : '';
+
+        const optimizedTrendQuery = `
+           SELECT 
+                ISNULL(p.DateValue, a.DateValue) as Date,
+                ISNULL(p.PlannedQty, 0) as PlannedQty,
+                ISNULL(a.ActualQty, 0) as ActualQty
+            FROM (
+                SELECT CAST(PostDate AS DATE) as DateValue, SUM(PlannedQty) as PlannedQty
+                FROM LDS_LIVE.dbo.OWOR 
+                WHERE Status IN ('R', 'P', 'L', 'C') ${planCond}
+                GROUP BY CAST(PostDate AS DATE)
+            ) p
+            FULL OUTER JOIN (
+                SELECT CAST(DocDate AS DATE) as DateValue, SUM(Quantity) as ActualQty
+                FROM LDS_LIVE.dbo.IGN1
+                WHERE BaseType = 202 ${actualCond}
+                GROUP BY CAST(DocDate AS DATE)
+            ) a ON p.DateValue = a.DateValue
+            ORDER BY Date
+        `;
+        const result = await request.query(optimizedTrendQuery);
+
+        res.status(200).json({
+            success: true,
+            data: result.recordset.map(row => ({
+                date: row.Date,
+                plannedQty: row.PlannedQty,
+                actualQty: row.ActualQty
+            }))
+        });
+    } catch (error) {
+        console.error("Error generating plan vs actual:", error);
+        res.status(500).json({ success: false, message: error.message });
     }
+};
 
-    const whereClauses = [tableDateCondition, statusCondition, whsCondition].filter(c => c !== '').join(' AND ');
-    const finalWhere = whereClauses ? `WHERE ${whereClauses}` : '';
 
-    const ordersQuery = `
-      SELECT
-        o.DocNum,
-        i.ItemName as ProductName,
-        o.Status,
-        o.PlannedQty,
-        ISNULL((SELECT SUM(Quantity) FROM LDS_LIVE.dbo.IGN1 WHERE BaseEntry = o.DocEntry AND BaseType = 202), 0) as ActualQty,
-        o.DueDate,
-        o.PostDate
-      FROM LDS_LIVE.dbo.OWOR o
-      LEFT JOIN LDS_LIVE.dbo.OITM i ON o.ItemCode = i.ItemCode
-      ${finalWhere}
-      ORDER BY o.PostDate DESC, o.DocNum DESC
-    `;
+exports.getCostSummary = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        
+        const { startDate, endDate, warehouse } = req.query;
+        if (startDate) request.input('startDate', sql.DateTime, new Date(startDate));
+        if (endDate) request.input('endDate', sql.DateTime, new Date(endDate));
+        if (warehouse && warehouse !== 'All') request.input('warehouse', sql.NVarChar, warehouse);
 
-    // 4. Order Volume Summary (Breakdown by status for the selected timeframe)
-    // We ignore the statusFilter so the donut chart always shows the full breakdown for the selected date range.
-    let volumeDateCondition = buildDateCondition(volumeDateFilter, 'o');
-    const volumeWhereClauses = [
-      volumeDateCondition !== '1=1' ? volumeDateCondition : '', 
-      whsCondition,
-      "o.Status IN ('R', 'L', 'C', 'P')"
-    ].filter(c => c !== '').join(' AND ');
+        const planWhere = [];
+        const actualWhere = [];
 
-    const volumeQuery = `
-      SELECT
-        SUM(CASE WHEN o.Status = 'R' THEN 1 ELSE 0 END) as ReleasedCount,
-        SUM(CASE WHEN o.Status = 'L' THEN 1 ELSE 0 END) as ClosedCount,
-        SUM(CASE WHEN o.Status = 'C' THEN 1 ELSE 0 END) as CancelledCount,
-        SUM(CASE WHEN o.Status = 'P' THEN 1 ELSE 0 END) as PlannedCount,
-        SUM(CASE WHEN o.Status IN ('P', 'R') AND o.DueDate < CAST(GETDATE() AS DATE) AND o.CmpltQty < o.PlannedQty THEN 1 ELSE 0 END) as DelayedCount
-      FROM LDS_LIVE.dbo.OWOR o
-      WHERE ${volumeWhereClauses}
-    `;
+        if (startDate) planWhere.push("o.PostDate >= @startDate");
+        if (endDate) planWhere.push("o.PostDate <= @endDate");
+        if (warehouse && warehouse !== 'All') planWhere.push("o.Warehouse = @warehouse");
 
-    const [ordersResult, volumeResult] = await Promise.all([
-      request.query(ordersQuery),
-      pool.request().query(volumeQuery)
-    ]);
+        if (startDate) actualWhere.push("i.DocDate >= @startDate");
+        if (endDate) actualWhere.push("i.DocDate <= @endDate");
+        if (warehouse && warehouse !== 'All') actualWhere.push("i.WhsCode = @warehouse");
 
-    res.status(200).json({
-      success: true,
-      data: {
-        orders: ordersResult.recordset,
-        volume: volumeResult.recordset[0]
-      }
-    });
+        const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
+        const actualCond = actualWhere.length > 0 ? ' AND ' + actualWhere.join(' AND ') : '';
 
-  } catch (error) {
-    console.error("Error in getFilteredOrders:", error);
-    res.status(500).json({ success: false, message: error.message });
-  }
+        // Standard Material Cost (WOR1 * OITM.AvgPrice)
+        const stdCostQuery = `
+            SELECT ISNULL(SUM(w.PlannedQty * m.AvgPrice), 0) as StandardMaterialCost,
+                   ISNULL(SUM(w.PlannedQty), 0) as TotalUnits
+            FROM LDS_LIVE.dbo.WOR1 w
+            INNER JOIN LDS_LIVE.dbo.OWOR o ON w.DocEntry = o.DocEntry
+            INNER JOIN LDS_LIVE.dbo.OITM m ON w.ItemCode = m.ItemCode
+            WHERE o.Status IN ('R', 'L', 'P', 'C') ${planCond}
+        `;
+        const stdCostResult = await request.query(stdCostQuery);
+        const stdMaterialCost = stdCostResult.recordset[0]?.StandardMaterialCost || 0;
+        const totalUnits = stdCostResult.recordset[0]?.TotalUnits || 1;
+
+        // Actual Material Cost (IGE1.LineTotal)
+        const actCostQuery = `
+            SELECT ISNULL(SUM(i.LineTotal), 0) as ActualMaterialCost,
+                   ISNULL(SUM(i.Quantity), 0) as ActualUnits
+            FROM LDS_LIVE.dbo.IGE1 i
+            WHERE i.BaseType = 202 ${actualCond}
+        `;
+        const actCostResult = await request.query(actCostQuery);
+        const actMaterialCost = actCostResult.recordset[0]?.ActualMaterialCost || 0;
+        const actualUnits = actCostResult.recordset[0]?.ActualUnits || 1;
+
+        const materialVariance = actMaterialCost - stdMaterialCost;
+        const materialVariancePercent = stdMaterialCost > 0 ? (materialVariance / stdMaterialCost) * 100 : 0;
+
+        res.status(200).json({
+            success: true,
+            data: {
+                material: {
+                    standard: stdMaterialCost,
+                    actual: actMaterialCost,
+                    variance: materialVariance,
+                    variancePercent: materialVariancePercent.toFixed(2)
+                },
+                labor: { standard: 0, actual: 0, variance: 0, variancePercent: 0 },
+                overhead: { standard: 0, actual: 0, variance: 0, variancePercent: 0 },
+                total: {
+                    standard: stdMaterialCost,
+                    actual: actMaterialCost,
+                    variance: materialVariance,
+                    variancePercent: materialVariancePercent.toFixed(2)
+                },
+                perUnit: {
+                    standard: stdMaterialCost / (totalUnits > 0 ? totalUnits : 1),
+                    actual: actMaterialCost / (actualUnits > 0 ? actualUnits : 1),
+                    variance: (actMaterialCost / (actualUnits > 0 ? actualUnits : 1)) - (stdMaterialCost / (totalUnits > 0 ? totalUnits : 1)),
+                }
+            }
+        });
+    } catch (error) {
+        console.error("Error generating cost summary:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getCostVariance = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        
+        const { startDate, endDate, warehouse } = req.query;
+        if (startDate) request.input('startDate', sql.DateTime, new Date(startDate));
+        if (endDate) request.input('endDate', sql.DateTime, new Date(endDate));
+        if (warehouse && warehouse !== 'All') request.input('warehouse', sql.NVarChar, warehouse);
+
+        const planWhere = [];
+        if (startDate) planWhere.push("o.PostDate >= @startDate");
+        if (endDate) planWhere.push("o.PostDate <= @endDate");
+        if (warehouse && warehouse !== 'All') planWhere.push("o.Warehouse = @warehouse");
+        const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
+
+        const varianceQuery = `
+            SELECT TOP 5
+                t.OrderNum,
+                t.Product,
+                t.StdCost,
+                t.ActualCost,
+                CASE WHEN t.StdCost > 0 
+                     THEN ((t.ActualCost - t.StdCost) / t.StdCost) * 100 
+                     ELSE 0 
+                END as VariancePercent
+            FROM (
+                SELECT 
+                    o.DocNum as OrderNum,
+                    o.ItemCode as Product,
+                    ISNULL((SELECT SUM(w.PlannedQty * m.AvgPrice) FROM LDS_LIVE.dbo.WOR1 w INNER JOIN LDS_LIVE.dbo.OITM m ON w.ItemCode = m.ItemCode WHERE w.DocEntry = o.DocEntry), 0) as StdCost,
+                    ISNULL((SELECT SUM(i.LineTotal) FROM LDS_LIVE.dbo.IGE1 i WHERE i.BaseEntry = o.DocEntry AND i.BaseType = 202), 0) as ActualCost
+                FROM LDS_LIVE.dbo.OWOR o
+                WHERE o.Status IN ('L', 'C') ${planCond}
+            ) t
+            ORDER BY VariancePercent DESC, t.OrderNum DESC
+        `;
+        const result = await request.query(varianceQuery);
+
+        const data = result.recordset.map(row => {
+            return {
+                OrderNum: row.OrderNum,
+                Product: row.Product,
+                StdCost: row.StdCost,
+                ActualCost: row.ActualCost,
+                VariancePercent: row.VariancePercent.toFixed(2)
+            };
+        });
+
+        res.status(200).json({ success: true, data });
+    } catch (error) {
+        console.error("Error generating cost variance:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getMaterialShortages = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        
+        const warehouseFilter = req.query.warehouse && req.query.warehouse !== 'All' ? `AND w.WhsCode = @warehouse` : '';
+        if(req.query.warehouse && req.query.warehouse !== 'All') request.input('warehouse', sql.NVarChar, req.query.warehouse);
+
+        const shortageQuery = `
+             SELECT TOP 10
+                 m.ItemCode,
+                 m.ItemName,
+                 ISNULL(SUM(w.IsCommited), 0) as RequiredQty,
+                 ISNULL(SUM(w.OnHand), 0) as AvailableQty,
+                 ISNULL(SUM(w.IsCommited), 0) - ISNULL(SUM(w.OnHand), 0) as Shortage
+             FROM LDS_LIVE.dbo.OITW w
+             INNER JOIN LDS_LIVE.dbo.OITM m ON w.ItemCode = m.ItemCode
+             WHERE 1=1 ${warehouseFilter}
+             GROUP BY m.ItemCode, m.ItemName
+             HAVING SUM(w.OnHand) < SUM(w.IsCommited)
+             ORDER BY Shortage DESC
+        `;
+        const result = await request.query(shortageQuery);
+
+        res.status(200).json({
+            success: true,
+            data: result.recordset
+        });
+    } catch (error) {
+        console.error("Error generating shortages:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getEfficiency = async (req, res) => {
+    res.status(200).json({ success: true, data: [] });
+};
+exports.getDowntime = async (req, res) => {
+    res.status(200).json({ success: true, data: { totalHrs: 0, percentage: 0, reasons: [] } });
+};
+exports.getOEE = async (req, res) => {
+    res.status(200).json({ success: true, data: { availability: 0, performance: 0, quality: 0, oee: 0 } });
+};
+
+exports.getQuality = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        
+        const { startDate, endDate, warehouse } = req.query;
+        if (startDate) request.input('startDate', sql.DateTime, new Date(startDate));
+        if (endDate) request.input('endDate', sql.DateTime, new Date(endDate));
+        if (warehouse && warehouse !== 'All') request.input('warehouse', sql.NVarChar, warehouse);
+
+        const planWhere = [];
+        const actualWhere = [];
+
+        if (startDate) planWhere.push("o.PostDate >= @startDate");
+        if (endDate) planWhere.push("o.PostDate <= @endDate");
+        if (warehouse && warehouse !== 'All') planWhere.push("o.Warehouse = @warehouse");
+
+        if (startDate) actualWhere.push("i.DocDate >= @startDate");
+        if (endDate) actualWhere.push("i.DocDate <= @endDate");
+        if (warehouse && warehouse !== 'All') actualWhere.push("i.WhsCode = @warehouse");
+
+        const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
+        const actualCond = actualWhere.length > 0 ? ' AND ' + actualWhere.join(' AND ') : '';
+
+        const qualityQuery = `
+            SELECT 
+                (SELECT ISNULL(SUM(o.PlannedQty), 0) FROM LDS_LIVE.dbo.OWOR o WHERE o.Status IN ('R', 'P', 'L', 'C') ${planCond}) as TotalPlanned,
+                (SELECT ISNULL(SUM(i.Quantity), 0) FROM LDS_LIVE.dbo.IGN1 i WHERE i.BaseType = 202 ${actualCond}) as TotalProduced,
+                (SELECT ISNULL(SUM(o.RjctQty), 0) FROM LDS_LIVE.dbo.OWOR o WHERE o.Status IN ('R', 'P', 'L', 'C') ${planCond}) as RejectedQty
+        `;
+        const result = await request.query(qualityQuery);
+        const data = result.recordset[0] || { TotalPlanned: 0, TotalProduced: 0, RejectedQty: 0 };
+        
+        const rejectionPercent = data.TotalProduced > 0 ? (data.RejectedQty / data.TotalProduced) * 100 : 0;
+        const firstPassYield = data.TotalProduced > 0 ? ((data.TotalProduced - data.RejectedQty) / data.TotalProduced) * 100 : 0;
+
+        res.status(200).json({
+            success: true,
+            data: {
+                rejectionPercent: rejectionPercent.toFixed(2),
+                reworkPercent: "0.00",
+                firstPassYield: firstPassYield.toFixed(2),
+                rejectedQty: data.RejectedQty,
+                reworkedQty: 0,
+                totalProduced: data.TotalProduced
+            }
+        });
+    } catch (error) {
+        console.error("Error generating quality:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getOrderSummary = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const request = pool.request();
+        const whereClause = buildWhereClause(req.query, request, 'o');
+        const finalWhere = whereClause ? `AND ${whereClause.substring(4)}` : '';
+
+        const summaryQuery = `
+            SELECT
+                COUNT(o.DocEntry) as TotalOrders,
+                SUM(CASE WHEN o.Status = 'R' THEN 1 ELSE 0 END) as InProgress,
+                SUM(CASE WHEN o.Status = 'P' THEN 1 ELSE 0 END) as Planned,
+                SUM(CASE WHEN o.Status = 'L' THEN 1 ELSE 0 END) as Completed,
+                SUM(CASE WHEN o.Status IN ('R', 'P') AND o.DueDate < CAST(GETDATE() AS DATE) AND o.CmpltQty < o.PlannedQty THEN 1 ELSE 0 END) as Delayed
+            FROM LDS_LIVE.dbo.OWOR o
+            WHERE o.Status IN ('R', 'P', 'L', 'C') ${finalWhere}
+        `;
+        const result = await request.query(summaryQuery);
+        const data = result.recordset[0] || { TotalOrders: 0, InProgress: 0, Planned: 0, Completed: 0, Delayed: 0 };
+
+        res.status(200).json({
+            success: true,
+            data: {
+                totalOrders: data.TotalOrders,
+                inProgress: data.InProgress,
+                onHold: data.Planned, 
+                completed: data.Completed,
+                delayed: data.Delayed,
+                atRisk: 0 
+            }
+        });
+    } catch (error) {
+        console.error("Error generating order summary:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getWarehouses = async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const query = `SELECT WhsCode as code, WhsName as name FROM LDS_LIVE.dbo.OWHS ORDER BY WhsCode`;
+        const result = await pool.request().query(query);
+
+        res.status(200).json({
+            success: true,
+            data: result.recordset
+        });
+    } catch (error) {
+        console.error("Error fetching warehouses:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
 };
