@@ -13,6 +13,7 @@ const productionPlanningRoutes = require('./routes/ProductionPlanning/production
 const dashboardRoutes = require('./routes/Dashboard/dashboard.route');
 const productionOrdersRoutes = require('./routes/ProductionOrders/productionOrders.route');
 const complaintsRoutes = require('./routes/Complaints/complaints.route');
+const aclRoutes = require("./routes/ACL/acl.route");
 const app = express();
 
 applySecurityAndMiddlewares(app);
@@ -47,6 +48,7 @@ app.use("/api/production-planning", productionPlanningRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/production-orders", productionOrdersRoutes);
 app.use("/api/complain", complaintsRoutes);
+app.use("/api/acl", aclRoutes);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;
