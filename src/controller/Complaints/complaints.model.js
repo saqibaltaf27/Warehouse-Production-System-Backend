@@ -1,7 +1,7 @@
 const { sql, poolPromise } = require("../../database/connection");
 
 class ComplaintsModel {
-    static async lookupItems(company, search, pagination) {
+    static async lookupItems(company, search, type, pagination) {
         const pool = await poolPromise;
         const request = pool.request();
         
@@ -13,12 +13,17 @@ class ComplaintsModel {
 
         request.input('limit', sql.Int, pagination.limit);
         request.input('offset', sql.Int, pagination.offset);
+        
+        let itemFilter = "";
+        if (type === 'FG') {
+            itemFilter = " AND ItemCode LIKE 'FG%' ";
+        }
 
         let queries = [];
         queries.push(`
             SELECT 'LDS' AS Company, ItemCode, ItemName, ISNULL(U_Cat1, '') AS U_Cat1, ISNULL(U_Prod_line, '') AS U_Prod_line 
             FROM lds_live.dbo.OITM 
-            WHERE FrozenFor = 'N' AND ItemCode LIKE 'FG%' ${searchSql}
+            WHERE FrozenFor = 'N' ${itemFilter} ${searchSql}
         `);
 
         let finalQuery = queries.join(" UNION ALL ");
