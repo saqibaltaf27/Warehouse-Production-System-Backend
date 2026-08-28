@@ -253,8 +253,103 @@ const getBatchExpiry = async (req, res) => {
   }
 };
 
+const getManpowerProductivity = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.pageSize) || 10;
+    const offset = (page - 1) * pageSize;
+
+    const countQuery = `SELECT COUNT(*) as count FROM dome.dbo.PrdManPower`;
+    const countResult = await pool.request().query(countQuery);
+    const totalRecords = countResult.recordset[0].count;
+
+    const query = `
+      SELECT 
+        Id,
+        [Date],
+        [Shift],
+        PlannedManpower,
+        ActualManpower,
+        WorkingHours,
+        TotalManHour,
+        ProductionQty,
+        UnitsPerManHour,
+        StdUnitsPerManHour,
+        PrdPercentage,
+        Remarks,
+        CreateDate,
+        CreatedBy
+      FROM dome.dbo.PrdManPower
+      ORDER BY [Date] DESC, Id DESC
+      OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY
+    `;
+    const result = await pool.request().query(query);
+    res.json({
+      success: true,
+      data: result.recordset,
+      pagination: {
+        totalRecords,
+        currentPage: page,
+        pageSize,
+        totalPages: Math.ceil(totalRecords / pageSize)
+      }
+    });
+  } catch (error) {
+    console.error("Error in getManpowerProductivity:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch manpower productivity" });
+  }
+};
+
+const addManpowerProductivity = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const { 
+      date, shift, plannedManpower, actualManpower, workingHours, 
+      totalManHour, productionQty, unitsPerManHour, stdUnitsPerManHour, 
+      prdPercentage, remarks, createdBy 
+    } = req.body;
+    
+    const query = `
+      BEGIN TRANSACTION;
+      DECLARE @NewId INT;
+      SELECT @NewId = ISNULL(MAX(Id), 0) + 1 FROM dome.dbo.PrdManPower WITH (UPDLOCK, SERIALIZABLE);
+      
+      INSERT INTO dome.dbo.PrdManPower 
+      (Id, [Date], [Shift], PlannedManpower, ActualManpower, WorkingHours, TotalManHour, ProductionQty, UnitsPerManHour, StdUnitsPerManHour, PrdPercentage, Remarks, CreatedBy)
+      VALUES 
+      (@NewId, @Date, @Shift, @PlannedManpower, @ActualManpower, @WorkingHours, @TotalManHour, @ProductionQty, @UnitsPerManHour, @StdUnitsPerManHour, @PrdPercentage, @Remarks, @CreatedBy);
+      
+      COMMIT TRANSACTION;
+      SELECT @NewId AS InsertedId;
+    `;
+    
+    const request = pool.request();
+    request.input('Date', date);
+    request.input('Shift', shift);
+    request.input('PlannedManpower', plannedManpower || null);
+    request.input('ActualManpower', actualManpower || null);
+    request.input('WorkingHours', workingHours || null);
+    request.input('TotalManHour', totalManHour || null);
+    request.input('ProductionQty', productionQty || null);
+    request.input('UnitsPerManHour', unitsPerManHour || null);
+    request.input('StdUnitsPerManHour', stdUnitsPerManHour || null);
+    request.input('PrdPercentage', prdPercentage || null);
+    request.input('Remarks', remarks || null);
+    request.input('CreatedBy', createdBy || null);
+    
+    const result = await request.query(query);
+    res.json({ success: true, message: 'Manpower productivity added', id: result.recordset[0].InsertedId });
+  } catch (error) {
+    console.error("Error in addManpowerProductivity:", error);
+    res.status(500).json({ success: false, message: "Failed to add manpower productivity" });
+  }
+};
+
 module.exports = {
   getExecutiveKPIs,
   getMaterialShortages,
-  getBatchExpiry
+  getBatchExpiry,
+  getManpowerProductivity,
+  addManpowerProductivity
 };
