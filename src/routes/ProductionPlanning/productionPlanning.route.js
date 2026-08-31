@@ -3,9 +3,7 @@ const router = express.Router();
 const { 
     getExecutiveKPIs, 
     getMaterialShortages, 
-    getBatchExpiry,
-    getManpowerProductivity,
-    addManpowerProductivity
+    getBatchExpiry
 } = require('../../controller/ProductionPlanning/productionPlanning.controller');
 const {
     getProductHistory,
@@ -24,7 +22,5 @@ router.get('/batch-expiry', getBatchExpiry);
 router.get('/history', getProductHistory);
 router.get('/trend', getTrendData);
 router.get('/recommendations', getRecommendations);
-router.get('/manpower', getManpowerProductivity);
-router.post('/manpower', addManpowerProductivity);
 
 module.exports = router;

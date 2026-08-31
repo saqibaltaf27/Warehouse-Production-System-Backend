@@ -101,7 +101,7 @@ class InventoryModel {
 
         let searchCondition = "";
         if (filters.search) {
-            searchCondition = " AND (T0.ItemCode LIKE @search OR T2.ItemName LIKE @search OR T0.DistNumber LIKE @search) ";
+            searchCondition = " AND (ItemCode LIKE @search OR ItemName LIKE @search OR BatchNumber LIKE @search) ";
             request.input('search', sql.VarChar, `%${filters.search}%`);
         }
 

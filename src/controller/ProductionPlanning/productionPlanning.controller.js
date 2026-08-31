@@ -108,38 +108,27 @@ const getMaterialShortages = async (req, res) => {
     const search = req.query.search || '';
     
     // Dataset 2: Material Shortages for Open Orders
+    // We use standard SAP B1 logic: IsCommited vs OnHand for true shortage
+    // But we filter only for items that are currently needed in Released Production Orders
     let query = `
-    WITH ComponentDemand AS (
-          SELECT 
-              w.ItemCode AS ComponentCode,
-              SUM(w.PlannedQty - w.IssuedQty) AS RemainingRequired
-          FROM LDS_Live.dbo.WOR1 w (NOLOCK)
-          INNER JOIN LDS_Live.dbo.OWOR p (NOLOCK) ON w.DocEntry = p.DocEntry
-          WHERE p.Status = 'R' AND w.ItemType = 4 AND (w.PlannedQty - w.IssuedQty) > 0
-          GROUP BY w.ItemCode
-      ),
-      AvailableStock AS (
-          SELECT 
-              ItemCode, 
-              SUM(OnHand) AS TotalAvailable
-          FROM LDS_Live.dbo.OITW (NOLOCK)
-          GROUP BY ItemCode
+      WITH ProdComponents AS (
+          SELECT DISTINCT w1.ItemCode
+          FROM LDS_LIVE.dbo.WOR1 w1 (NOLOCK)
+          INNER JOIN LDS_LIVE.dbo.OWOR p (NOLOCK) ON w1.DocEntry = p.DocEntry 
+          WHERE p.Status = 'R' AND w1.ItemType = 4 AND (w1.PlannedQty - w1.IssuedQty) > 0
       ),
       Shortages AS (
           SELECT 
-              d.ComponentCode,
-              i.ItemName AS ComponentName,
-              d.RemainingRequired,
-              ISNULL(s.TotalAvailable, 0) AS TotalAvailable,
-              CASE 
-                  WHEN ISNULL(s.TotalAvailable, 0) < d.RemainingRequired 
-                  THEN d.RemainingRequired - ISNULL(s.TotalAvailable, 0) 
-                  ELSE 0 
-              END AS ShortageQty
-          FROM ComponentDemand d
-          LEFT JOIN AvailableStock s ON d.ComponentCode = s.ItemCode
-          LEFT JOIN LDS_Live.dbo.OITM i (NOLOCK) ON d.ComponentCode = i.ItemCode
-          WHERE ISNULL(s.TotalAvailable, 0) < d.RemainingRequired
+              m.ItemCode AS ComponentCode,
+              m.ItemName AS ComponentName,
+              ISNULL(SUM(w.IsCommited), 0) AS RemainingRequired,
+              ISNULL(SUM(w.OnHand), 0) AS TotalAvailable,
+              ISNULL(SUM(w.IsCommited), 0) - ISNULL(SUM(w.OnHand), 0) AS ShortageQty
+          FROM LDS_LIVE.dbo.OITW w (NOLOCK)
+          INNER JOIN LDS_LIVE.dbo.OITM m (NOLOCK) ON w.ItemCode = m.ItemCode
+          INNER JOIN ProdComponents pc ON m.ItemCode = pc.ItemCode
+          GROUP BY m.ItemCode, m.ItemName
+          HAVING SUM(w.OnHand) < SUM(w.IsCommited)
       )
       SELECT * FROM Shortages 
       WHERE 1=1
@@ -253,103 +242,9 @@ const getBatchExpiry = async (req, res) => {
   }
 };
 
-const getManpowerProductivity = async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const page = parseInt(req.query.page) || 1;
-    const pageSize = parseInt(req.query.pageSize) || 10;
-    const offset = (page - 1) * pageSize;
-
-    const countQuery = `SELECT COUNT(*) as count FROM dome.dbo.PrdManPower`;
-    const countResult = await pool.request().query(countQuery);
-    const totalRecords = countResult.recordset[0].count;
-
-    const query = `
-      SELECT 
-        Id,
-        [Date],
-        [Shift],
-        PlannedManpower,
-        ActualManpower,
-        WorkingHours,
-        TotalManHour,
-        ProductionQty,
-        UnitsPerManHour,
-        StdUnitsPerManHour,
-        PrdPercentage,
-        Remarks,
-        CreateDate,
-        CreatedBy
-      FROM dome.dbo.PrdManPower
-      ORDER BY [Date] DESC, Id DESC
-      OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY
-    `;
-    const result = await pool.request().query(query);
-    res.json({
-      success: true,
-      data: result.recordset,
-      pagination: {
-        totalRecords,
-        currentPage: page,
-        pageSize,
-        totalPages: Math.ceil(totalRecords / pageSize)
-      }
-    });
-  } catch (error) {
-    console.error("Error in getManpowerProductivity:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch manpower productivity" });
-  }
-};
-
-const addManpowerProductivity = async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const { 
-      date, shift, plannedManpower, actualManpower, workingHours, 
-      totalManHour, productionQty, unitsPerManHour, stdUnitsPerManHour, 
-      prdPercentage, remarks, createdBy 
-    } = req.body;
-    
-    const query = `
-      BEGIN TRANSACTION;
-      DECLARE @NewId INT;
-      SELECT @NewId = ISNULL(MAX(Id), 0) + 1 FROM dome.dbo.PrdManPower WITH (UPDLOCK, SERIALIZABLE);
-      
-      INSERT INTO dome.dbo.PrdManPower 
-      (Id, [Date], [Shift], PlannedManpower, ActualManpower, WorkingHours, TotalManHour, ProductionQty, UnitsPerManHour, StdUnitsPerManHour, PrdPercentage, Remarks, CreatedBy)
-      VALUES 
-      (@NewId, @Date, @Shift, @PlannedManpower, @ActualManpower, @WorkingHours, @TotalManHour, @ProductionQty, @UnitsPerManHour, @StdUnitsPerManHour, @PrdPercentage, @Remarks, @CreatedBy);
-      
-      COMMIT TRANSACTION;
-      SELECT @NewId AS InsertedId;
-    `;
-    
-    const request = pool.request();
-    request.input('Date', date);
-    request.input('Shift', shift);
-    request.input('PlannedManpower', plannedManpower || null);
-    request.input('ActualManpower', actualManpower || null);
-    request.input('WorkingHours', workingHours || null);
-    request.input('TotalManHour', totalManHour || null);
-    request.input('ProductionQty', productionQty || null);
-    request.input('UnitsPerManHour', unitsPerManHour || null);
-    request.input('StdUnitsPerManHour', stdUnitsPerManHour || null);
-    request.input('PrdPercentage', prdPercentage || null);
-    request.input('Remarks', remarks || null);
-    request.input('CreatedBy', createdBy || null);
-    
-    const result = await request.query(query);
-    res.json({ success: true, message: 'Manpower productivity added', id: result.recordset[0].InsertedId });
-  } catch (error) {
-    console.error("Error in addManpowerProductivity:", error);
-    res.status(500).json({ success: false, message: "Failed to add manpower productivity" });
-  }
-};
-
 module.exports = {
   getExecutiveKPIs,
   getMaterialShortages,
-  getBatchExpiry,
-  getManpowerProductivity,
-  addManpowerProductivity
+  getBatchExpiry
 };
+
