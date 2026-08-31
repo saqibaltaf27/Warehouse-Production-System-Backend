@@ -13,6 +13,7 @@ const productionPlanningRoutes = require('./routes/ProductionPlanning/production
 const dashboardRoutes = require('./routes/Dashboard/dashboard.route');
 const productionOrdersRoutes = require('./routes/ProductionOrders/productionOrders.route');
 const complaintsRoutes = require('./routes/Complaints/complaints.route');
+const productionTemplateRoutes = require("./controller/ProductionTemplate/productionTemplate.routes");
 const aclRoutes = require("./routes/ACL/acl.route");
 const app = express();
 
@@ -47,6 +48,7 @@ app.use("/api/inventory", inventoryRoutes);
 app.use("/api/production-planning", productionPlanningRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/production-orders", productionOrdersRoutes);
+app.use("/api/production-template", productionTemplateRoutes);
 app.use("/api/complain", complaintsRoutes);
 app.use("/api/acl", aclRoutes);
 app.use(errorHandler);

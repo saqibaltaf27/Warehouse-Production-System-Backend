@@ -7,10 +7,12 @@ class ComplaintsController {
             const page = parseInt(req.query.page, 10) || 1;
             const limit = parseInt(req.query.limit, 10) || 200;
             const offset = (page - 1) * limit;
+            const type = req.query.type || 'ALL'; // Default to all if not specified
 
             const result = await complaintsModel.lookupItems(
                 req.query.company || null,
                 req.query.search || null,
+                type,
                 { limit, offset }
             );
             sendSuccess(res, result, "Items fetched successfully");
