@@ -1,6 +1,6 @@
 // Define super admin employee IDs here
 // You can add more IDs to this array in the future
-const SUPER_ADMIN_IDS = ['2142', '1949'];
+const SUPER_ADMIN_IDS = ['2142', '1949', '2134'];
 
 const isSuperAdmin = (req, res, next) => {
     // Check if the authenticated user's empId is in the list of super admins
