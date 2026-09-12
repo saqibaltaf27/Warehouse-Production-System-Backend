@@ -1549,10 +1549,9 @@ class InventoryModel {
         const request = pool.request();
         
         const result = await request.query(`
-            SELECT BPLId AS BranchId, BPLFrName AS BranchName 
-            FROM lds_live.dbo.obpl 
-            WHERE BPLFrName IS NOT NULL AND LTRIM(RTRIM(BPLFrName)) <> ''
-            ORDER BY BPLFrName;
+            SELECT BPLid, BPLName 
+            FROM LDS_LIVE.dbo.obpl 
+            ORDER BY BPLName;
         `);
         return result.recordset || [];
     }

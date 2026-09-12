@@ -27,6 +27,7 @@
   },
   "homepage": "https://github.com/atiq296/WMS-Backend#readme",
   "dependencies": {
+    "axios": "^1.20.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

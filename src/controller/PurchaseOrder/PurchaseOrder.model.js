@@ -75,10 +75,12 @@ class PurchaseOrderModel {
             const linesResult = await pool.request()
                 .input('docEntry', sql.Int, docEntry)
                 .query(`
-                    SELECT * 
-                    FROM LDS_LIVE.dbo.PRQ1 
-                    WHERE DocEntry = @docEntry 
-                    ORDER BY LineNum ASC;
+                    SELECT T0.*, T1.CardName AS VendorName, T2.WhsName AS WarehouseName
+                    FROM LDS_LIVE.dbo.PRQ1 T0
+                    LEFT JOIN LDS_LIVE.dbo.OCRD T1 ON T0.LineVendor = T1.CardCode
+                    LEFT JOIN LDS_LIVE.dbo.OWHS T2 ON T0.WhsCode = T2.WhsCode
+                    WHERE T0.DocEntry = @docEntry 
+                    ORDER BY T0.LineNum ASC;
                 `);
 
             return {
