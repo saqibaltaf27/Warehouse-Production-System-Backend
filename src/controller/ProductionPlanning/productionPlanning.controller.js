@@ -242,9 +242,170 @@ const getBatchExpiry = async (req, res) => {
   }
 };
 
+const getOpenProductionOrders = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `SELECT DocNum FROM LDS_LIVE.dbo.OWOR WHERE Status IN ('R','L') ORDER BY DocNum DESC`;
+    const result = await pool.request().query(query);
+    
+    res.json({
+      success: true,
+      data: result.recordset
+    });
+  } catch (error) {
+    console.error("Error in getOpenProductionOrders:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch open production orders" });
+  }
+};
+
+const getProductionPlans = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `
+      SELECT 
+        p.Id, p.PlanDate, p.Line, p.Machine, p.Supervisor, p.PO, p.Persons, p.CreatedAt,
+        ISNULL(o.PlannedQty, 0) AS PlannedQty,
+        ISNULL(o.CmpltQty, 0) AS CmpltQty
+      FROM Dome.dbo.PmsProductionPlanning p
+      LEFT JOIN LDS_LIVE.dbo.OWOR o ON p.PO = CAST(o.DocNum AS NVARCHAR(100))
+      ORDER BY p.CreatedAt DESC
+    `;
+    const result = await pool.request().query(query);
+    
+    // Parse Persons JSON for the frontend
+    const plans = result.recordset.map(plan => ({
+      ...plan,
+      jdItems: plan.Persons ? JSON.parse(plan.Persons) : []
+    }));
+
+    res.json({
+      success: true,
+      data: plans
+    });
+  } catch (error) {
+    console.error("Error in getProductionPlans:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch production plans" });
+  }
+};
+
+const createProductionPlan = async (req, res) => {
+  try {
+    const { date, line, machine, supervisor, po, jdItems } = req.body;
+    
+    if (!date || !line) {
+      return res.status(400).json({ success: false, message: "Date and Line are required" });
+    }
+
+    const pool = await poolPromise;
+    const personsJson = JSON.stringify(jdItems || []);
+
+    const insertQuery = `
+      BEGIN TRAN;
+      DECLARE @NextId INT;
+      SELECT @NextId = ISNULL(MAX(Id), 0) + 1 FROM Dome.dbo.PmsProductionPlanning WITH (UPDLOCK, ROWLOCK);
+      
+      INSERT INTO Dome.dbo.PmsProductionPlanning (Id, PlanDate, Line, Machine, Supervisor, PO, Persons, CreatedAt)
+      VALUES (@NextId, @PlanDate, @Line, @Machine, @Supervisor, @PO, @Persons, GETDATE());
+      
+      SELECT @NextId AS NextId;
+      COMMIT TRAN;
+    `;
+
+    const result = await pool.request()
+      .input('PlanDate', date)
+      .input('Line', line)
+      .input('Machine', machine || null)
+      .input('Supervisor', supervisor || null)
+      .input('PO', po || null)
+      .input('Persons', personsJson)
+      .query(insertQuery);
+
+    const nextId = result.recordset[0].NextId;
+
+    res.json({
+      success: true,
+      message: "Plan created successfully",
+      data: { id: nextId }
+    });
+  } catch (error) {
+    console.error("Error in createProductionPlan:", error);
+    res.status(500).json({ success: false, message: "Failed to create production plan" });
+  }
+};
+
+const updateProductionPlan = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { date, line, machine, supervisor, po, jdItems } = req.body;
+    
+    if (!id || !date || !line) {
+      return res.status(400).json({ success: false, message: "ID, Date and Line are required" });
+    }
+
+    const pool = await poolPromise;
+    const personsJson = JSON.stringify(jdItems || []);
+
+    const updateQuery = `
+      UPDATE Dome.dbo.PmsProductionPlanning
+      SET PlanDate = @PlanDate,
+          Line = @Line,
+          Machine = @Machine,
+          Supervisor = @Supervisor,
+          PO = @PO,
+          Persons = @Persons
+      WHERE Id = @Id
+    `;
+
+    await pool.request()
+      .input('Id', id)
+      .input('PlanDate', date)
+      .input('Line', line)
+      .input('Machine', machine || null)
+      .input('Supervisor', supervisor || null)
+      .input('PO', po || null)
+      .input('Persons', personsJson)
+      .query(updateQuery);
+
+    res.json({
+      success: true,
+      message: "Plan updated successfully"
+    });
+  } catch (error) {
+    console.error("Error in updateProductionPlan:", error);
+    res.status(500).json({ success: false, message: "Failed to update production plan" });
+  }
+};
+
+const getMachines = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `
+      SELECT ItemCode, ItemName 
+      FROM LDS_LIVE.dbo.OITM 
+      WHERE itmsGrpCod = '100' 
+      AND U_cat1 IN ('Equipments', 'Finished Product')
+      ORDER BY ItemName ASC
+    `;
+    const result = await pool.request().query(query);
+    
+    res.json({
+      success: true,
+      data: result.recordset
+    });
+  } catch (error) {
+    console.error("Error in getMachines:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch machines" });
+  }
+};
+
 module.exports = {
   getExecutiveKPIs,
   getMaterialShortages,
-  getBatchExpiry
+  getBatchExpiry,
+  getOpenProductionOrders,
+  getProductionPlans,
+  createProductionPlan,
+  updateProductionPlan,
+  getMachines
 };
 

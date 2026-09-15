@@ -16,6 +16,8 @@ const complaintsRoutes = require('./routes/Complaints/complaints.route');
 const productionTemplateRoutes = require("./controller/ProductionTemplate/productionTemplate.routes");
 const aclRoutes = require("./routes/ACL/acl.route");
 const pmRoutes = require("./routes/PreventiveMaintenance/pm.route");
+const machineRoutes = require("./routes/Machine/machine.route");
+const purchaseOrderRoutes = require("./routes/PurchaseOrder/PurchaseOrder.route");
 const app = express();
 
 applySecurityAndMiddlewares(app);
@@ -53,6 +55,8 @@ app.use("/api/production-template", productionTemplateRoutes);
 app.use("/api/complain", complaintsRoutes);
 app.use("/api/acl", aclRoutes);
 app.use("/api/pms", pmRoutes);
+app.use("/api/machine", machineRoutes);
+app.use("/api/purchase-order", purchaseOrderRoutes);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;

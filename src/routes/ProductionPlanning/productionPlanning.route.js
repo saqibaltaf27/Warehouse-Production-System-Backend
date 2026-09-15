@@ -3,7 +3,12 @@ const router = express.Router();
 const { 
     getExecutiveKPIs, 
     getMaterialShortages, 
-    getBatchExpiry
+    getBatchExpiry,
+    getOpenProductionOrders,
+    getProductionPlans,
+    createProductionPlan,
+    updateProductionPlan,
+    getMachines
 } = require('../../controller/ProductionPlanning/productionPlanning.controller');
 const {
     getProductHistory,
@@ -17,6 +22,13 @@ const {
 router.get('/kpis', getExecutiveKPIs);
 router.get('/shortages', getMaterialShortages);
 router.get('/batch-expiry', getBatchExpiry);
+router.get('/open-orders', getOpenProductionOrders);
+router.get('/machines', getMachines);
+
+// Production Plan Routes
+router.get('/plans', getProductionPlans);
+router.post('/plan', createProductionPlan);
+router.put('/plan/:id', updateProductionPlan);
 
 // New Routes
 router.get('/history', getProductHistory);
