@@ -192,60 +192,51 @@ exports.getProductionOrders = async (req, res) => {
     const totalRecords = countResult.recordset[0].totalRecords;
     
     const query = `
-      WITH ActualIssues AS (
-        SELECT BaseEntry, BaseLine, ItemCode, SUM(Quantity) as ActualQty, SUM(LineTotal) as ActualCost
-        FROM LDS_LIVE.dbo.IGE1
-        WHERE BaseType = 202
-        GROUP BY BaseEntry, BaseLine, ItemCode
+      WITH ItemCost AS (
+        SELECT P.DocEntry,
+               CAST(ISNULL(-SUM(CASE WHEN N.OutQty > 0 THEN N.TransValue ELSE 0 END), 0) as DECIMAL(19,3)) as ActualItemComponentCost
+        FROM LDS_LIVE.dbo.OWOR P
+        LEFT JOIN LDS_LIVE.dbo.OINM N ON N.AppObjAbs = P.DocEntry AND N.ApplObj = 202 AND N.OutQty > 0
+        GROUP BY P.DocEntry
       ),
-      OrderLines AS (
+      ResourceCost AS (
+        SELECT P.DocEntry,
+               CAST(ISNULL(SUM(R.Total), 0) as DECIMAL(19,3)) as ActualResourceComponentCost
+        FROM LDS_LIVE.dbo.OWOR P
+        LEFT JOIN LDS_LIVE.dbo.IGE1 I ON I.BaseEntry = P.DocEntry AND I.BaseType = 202
+        LEFT JOIN LDS_LIVE.dbo.IGE22 R ON R.DocEntry = I.DocEntry AND R.LineNum = I.LineNum
+        GROUP BY P.DocEntry
+      ),
+      AdditionalCost AS (
+        SELECT P.DocEntry,
+               CAST(ISNULL(SUM(I.LineTotal), 0) as DECIMAL(19,3)) as ActualAdditionalCost
+        FROM LDS_LIVE.dbo.OWOR P
+        INNER JOIN LDS_LIVE.dbo.IGE1 I ON I.BaseEntry = P.DocEntry AND I.BaseType = 202
+        LEFT JOIN LDS_LIVE.dbo.OITM M ON M.ItemCode = I.ItemCode
+        WHERE ISNULL(M.InvntItem, 'Y') = 'N'
+        GROUP BY P.DocEntry
+      ),
+      ProductCost AS (
+        SELECT P.DocEntry,
+               CAST(ISNULL(SUM(G.StockPrice * G.Quantity), 0) as DECIMAL(19,3)) as ActualProductCost,
+               SUM(G.Quantity) as FGQty
+        FROM LDS_LIVE.dbo.OWOR P
+        INNER JOIN LDS_LIVE.dbo.IGN1 G ON G.BaseEntry = P.DocEntry AND G.BaseType = 202 AND G.ItemCode = P.ItemCode
+        GROUP BY P.DocEntry
+      ),
+      PlannedCosts AS (
         SELECT 
           w.DocEntry,
-          w.LineNum,
-          w.ItemCode,
-          w.ItemType,
-          ISNULL(r.ResType, 'I') as ResType,
-          w.PlannedQty,
-          ISNULL(a.ActualQty, 0) as ActualQty,
-          ISNULL(CASE WHEN w.ItemType = 290 THEN r.StdCost1 ELSE ISNULL(Mat.UnitCost, 0) END, 0) as PlannedPrice,
-          (CASE 
-             WHEN w.ItemType = 290 THEN ISNULL(a.ActualCost, 0)
-             ELSE ISNULL(a.ActualQty, 0) * ISNULL(Mat.UnitCost, 0)
-           END) as ActualLineCost
-        FROM LDS_LIVE.dbo.OWOR o
-        INNER JOIN LDS_LIVE.dbo.WOR1 w ON o.DocEntry = w.DocEntry
+          SUM(w.PlannedQty * ISNULL(CASE WHEN w.ItemType = 290 THEN r.StdCost1 ELSE ISNULL(Mat.UnitCost, 0) END, 0)) as PlannedCost
+        FROM LDS_LIVE.dbo.WOR1 w
         LEFT JOIN LDS_LIVE.dbo.ORSC r ON w.ItemCode = r.ResCode AND w.ItemType = 290
-        LEFT JOIN ActualIssues a ON w.DocEntry = a.BaseEntry AND w.LineNum = a.BaseLine AND w.ItemCode = a.ItemCode
         OUTER APPLY (
           SELECT TOP 1 CASE WHEN T0.InQty > 0 THEN T0.TransValue / T0.InQty ELSE 0 END AS UnitCost
           FROM LDS_LIVE.dbo.OINM T0
           WHERE T0.ItemCode = w.ItemCode AND T0.InQty > 0 AND w.ItemType <> 290
           ORDER BY T0.DocDate DESC, T0.TransSeq DESC
         ) as Mat
-        ${whereClause}
-      ),
-      AggregatedCosts AS (
-        SELECT 
-          DocEntry,
-          SUM(PlannedQty * PlannedPrice) as PlannedCost,
-          SUM(CASE WHEN ItemType = 290 AND ResType = 'L' THEN PlannedQty * PlannedPrice ELSE 0 END) as PlannedLabourCost,
-          SUM(CASE WHEN ItemType = 290 AND ResType = 'M' THEN PlannedQty * PlannedPrice ELSE 0 END) as PlannedMachineCost,
-          SUM(CASE WHEN ItemType = 290 AND ResType = 'O' THEN PlannedQty * PlannedPrice ELSE 0 END) as PlannedFOHCost,
-          SUM(CASE WHEN ItemType <> 290 THEN PlannedQty * PlannedPrice ELSE 0 END) as PlannedMaterialCost,
-          
-          SUM(ActualLineCost) as ActualCost,
-          SUM(CASE WHEN ItemType = 290 AND ResType = 'L' THEN ActualLineCost ELSE 0 END) as ActualLabourCost,
-          SUM(CASE WHEN ItemType = 290 AND ResType = 'M' THEN ActualLineCost ELSE 0 END) as ActualMachineCost,
-          SUM(CASE WHEN ItemType = 290 AND ResType = 'O' THEN ActualLineCost ELSE 0 END) as ActualFOHCost,
-          SUM(CASE WHEN ItemType <> 290 THEN ActualLineCost ELSE 0 END) as ActualMaterialCost
-        FROM OrderLines
-        GROUP BY DocEntry
-      ),
-      FGProduced AS (
-        SELECT BaseEntry, SUM(Quantity) as FGQty
-        FROM LDS_LIVE.dbo.IGN1
-        WHERE BaseType = 202
-        GROUP BY BaseEntry
+        GROUP BY w.DocEntry
       )
       SELECT
         o.DocEntry,
@@ -258,19 +249,20 @@ exports.getProductionOrders = async (req, res) => {
         ISNULL(f.FGQty, 0) as ActualFGQty,
         (CASE WHEN o.PlannedQty > 0 THEN (ISNULL(f.FGQty, 0) / o.PlannedQty) * 100 ELSE 0 END) as YieldPercent,
         ISNULL(p.PlannedCost, 0) as PlannedCost,
-        ISNULL(p.PlannedMaterialCost, 0) as PlannedMaterialCost,
-        ISNULL(p.PlannedLabourCost, 0) as PlannedLabourCost,
-        ISNULL(p.PlannedMachineCost, 0) as PlannedMachineCost,
-        ISNULL(p.PlannedFOHCost, 0) as PlannedFOHCost,
-        ISNULL(p.ActualCost, 0) as ActualCost,
-        ISNULL(p.ActualMaterialCost, 0) as ActualMaterialCost,
-        ISNULL(p.ActualLabourCost, 0) as ActualLabourCost,
-        ISNULL(p.ActualMachineCost, 0) as ActualMachineCost,
-        ISNULL(p.ActualFOHCost, 0) as ActualFOHCost,
-        (ISNULL(p.ActualCost, 0) - ISNULL(p.PlannedCost, 0)) as TotalVariance
+        
+        (ISNULL(ic.ActualItemComponentCost, 0) + ISNULL(rc.ActualResourceComponentCost, 0) + ISNULL(ac.ActualAdditionalCost, 0)) as ActualCost,
+        ISNULL(ic.ActualItemComponentCost, 0) as ActualMaterialCost,
+        ISNULL(rc.ActualResourceComponentCost, 0) as ActualLabourCost,
+        ISNULL(ac.ActualAdditionalCost, 0) as ActualFOHCost,
+        ISNULL(f.ActualProductCost, 0) as ActualProductCost,
+        
+        ((ISNULL(ic.ActualItemComponentCost, 0) + ISNULL(rc.ActualResourceComponentCost, 0) + ISNULL(ac.ActualAdditionalCost, 0)) - ISNULL(p.PlannedCost, 0)) as TotalVariance
       FROM LDS_LIVE.dbo.OWOR o
-      LEFT JOIN AggregatedCosts p ON o.DocEntry = p.DocEntry
-      LEFT JOIN FGProduced f ON o.DocEntry = f.BaseEntry
+      LEFT JOIN PlannedCosts p ON o.DocEntry = p.DocEntry
+      LEFT JOIN ItemCost ic ON o.DocEntry = ic.DocEntry
+      LEFT JOIN ResourceCost rc ON o.DocEntry = rc.DocEntry
+      LEFT JOIN AdditionalCost ac ON o.DocEntry = ac.DocEntry
+      LEFT JOIN ProductCost f ON o.DocEntry = f.DocEntry
       ${whereClause}
       ORDER BY o.PostDate DESC, o.DocEntry DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
@@ -336,7 +328,7 @@ exports.getOrderMaterials = async (req, res) => {
           WHERE T0.ItemCode = w.ItemCode AND T0.InQty > 0 AND w.ItemType <> 290
           ORDER BY T0.DocDate DESC, T0.TransSeq DESC
         ) as Mat
-        WHERE w.DocEntry = @docEntry AND w.ItemType <> 290
+        WHERE w.DocEntry = @docEntry
       )
       SELECT 
         LineNum,
