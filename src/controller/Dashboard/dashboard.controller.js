@@ -35,29 +35,77 @@ exports.getOverviewData = async (req, res) => {
     const planWhere = [];
     const actualWhere = [];
 
-    if (startDate) planWhere.push("o.PostDate >= @startDate");
-    if (endDate) planWhere.push("o.PostDate <= @endDate");
-    if (warehouse && warehouse !== 'All') planWhere.push("o.Warehouse = @warehouse");
-
-    if (startDate) actualWhere.push("i.DocDate >= @startDate");
-    if (endDate) actualWhere.push("i.DocDate <= @endDate");
-    if (warehouse && warehouse !== 'All') actualWhere.push("i.WhsCode = @warehouse");
+    if (startDate) {
+      planWhere.push("CAST(a.PostDate AS DATE) >= @startDate");
+      actualWhere.push("CAST(r.DocDate AS DATE) >= @startDate");
+    }
+    if (endDate) {
+      planWhere.push("CAST(a.PostDate AS DATE) <= @endDate");
+      actualWhere.push("CAST(r.DocDate AS DATE) <= @endDate");
+    }
+    if (warehouse && warehouse !== 'All') {
+      planWhere.push("a.Warehouse = @warehouse");
+    }
 
     const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
     const actualCond = actualWhere.length > 0 ? ' AND ' + actualWhere.join(' AND ') : '';
 
+    // Query: Get distinct POs with their PlannedQty (once per PO) and sum of receipt actuals
     const query = `
+      ;WITH PlannedOrders AS (
+        SELECT DISTINCT 
+          a.DocNum AS PO,
+          a.Status,
+          a.ItemCode,
+          a.ProdName,
+          a.PlannedQty,
+          CAST(a.PostDate AS DATE) AS CreateDate
+        FROM LDS_LIVE.dbo.AWOR a
+        JOIN LDS_LIVE.dbo.OWOR b ON a.DocNum = b.DocNum AND b.PlannedQty = a.PlannedQty
+        WHERE a.Status <> 'P' AND a.CmpltQty = 0.00 ${planCond}
+      ),
+      ReceiptOrders AS (
+        SELECT
+          r.BaseRef AS PONo,
+          SUM(r.Quantity) AS ActualQty
+        FROM LDS_LIVE.dbo.IGN1 r
+        WHERE r.BaseType = 202 AND r.TranType = 'C' ${actualCond}
+        GROUP BY r.BaseRef
+      )
       SELECT 
-        (SELECT ISNULL(SUM(o.PlannedQty), 0) FROM LDS_LIVE.dbo.OWOR o WHERE o.Status IN ('R', 'P', 'L', 'C') ${planCond}) as PlannedQty,
-        (SELECT ISNULL(SUM(i.Quantity), 0) FROM LDS_LIVE.dbo.IGN1 i WHERE i.BaseType = 202 ${actualCond}) as ActualQty,
-        (SELECT COUNT(o.DocEntry) FROM LDS_LIVE.dbo.OWOR o WHERE o.Status IN ('R', 'P', 'L', 'C') ${planCond}) as TotalOrders
+        p.PO,
+        p.ItemCode,
+        p.ProdName,
+        p.PlannedQty,
+        p.CreateDate,
+        ISNULL(r.ActualQty, 0) AS ActualQty
+      FROM PlannedOrders p
+      JOIN ReceiptOrders r ON CAST(p.PO AS NVARCHAR) = r.PONo
+      ORDER BY p.PO DESC
     `;
 
     const result = await request.query(query);
-    const data = result.recordset[0] || { PlannedQty: 0, ActualQty: 0, TotalOrders: 0 };
     
-    // Achievement
-    const achievement = data.PlannedQty > 0 ? (data.ActualQty / data.PlannedQty) * 100 : 0;
+    // Process PO Breakdown and Aggregate Totals
+    let totalPlan = 0;
+    let totalActual = 0;
+    
+    const poBreakdown = result.recordset.map(row => {
+      totalPlan += row.PlannedQty;
+      totalActual += row.ActualQty;
+      
+      return {
+        po: row.PO,
+        itemCode: row.ItemCode,
+        prodName: row.ProdName,
+        plan: row.PlannedQty,
+        actual: row.ActualQty,
+        achievement: row.PlannedQty > 0 ? ((row.ActualQty / row.PlannedQty) * 100).toFixed(2) : 0
+      };
+    });
+
+    const totalOrders = poBreakdown.length;
+    const achievement = totalPlan > 0 ? (totalActual / totalPlan) * 100 : 0;
 
     // Advanced Metrics using the user's query
     let prodWhere = [];
@@ -108,13 +156,14 @@ exports.getOverviewData = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        plan: data.PlannedQty,
-        actual: data.ActualQty,
+        plan: totalPlan,
+        actual: totalActual,
         achievement: achievement.toFixed(2),
-        totalOrders: data.TotalOrders,
+        totalOrders: totalOrders,
         dailyEfficiency: metricsData.DailyEfficiency,
         oee: metricsData.OEE,
-        capacityUtil: metricsData.CapacityUtil
+        capacityUtil: metricsData.CapacityUtil,
+        poBreakdown: poBreakdown
       }
     });
   } catch (error) {
@@ -205,35 +254,47 @@ exports.getPlanVsActual = async (req, res) => {
         const planWhere = [];
         const actualWhere = [];
 
-        if (startDate) planWhere.push("PostDate >= @startDate");
-        if (endDate) planWhere.push("PostDate <= @endDate");
-        if (warehouse && warehouse !== 'All') planWhere.push("Warehouse = @warehouse");
-
-        if (startDate) actualWhere.push("DocDate >= @startDate");
-        if (endDate) actualWhere.push("DocDate <= @endDate");
-        if (warehouse && warehouse !== 'All') actualWhere.push("WhsCode = @warehouse");
+        if (startDate) {
+          planWhere.push("CAST(a.PostDate AS DATE) >= @startDate");
+          actualWhere.push("CAST(r.DocDate AS DATE) >= @startDate");
+        }
+        if (endDate) {
+          planWhere.push("CAST(a.PostDate AS DATE) <= @endDate");
+          actualWhere.push("CAST(r.DocDate AS DATE) <= @endDate");
+        }
+        if (warehouse && warehouse !== 'All') {
+          planWhere.push("a.Warehouse = @warehouse");
+        }
 
         const planCond = planWhere.length > 0 ? ' AND ' + planWhere.join(' AND ') : '';
         const actualCond = actualWhere.length > 0 ? ' AND ' + actualWhere.join(' AND ') : '';
 
         const optimizedTrendQuery = `
-           SELECT 
-                ISNULL(p.DateValue, a.DateValue) as Date,
-                ISNULL(p.PlannedQty, 0) as PlannedQty,
-                ISNULL(a.ActualQty, 0) as ActualQty
-            FROM (
-                SELECT CAST(PostDate AS DATE) as DateValue, SUM(PlannedQty) as PlannedQty
-                FROM LDS_LIVE.dbo.OWOR 
-                WHERE Status IN ('R', 'P', 'L', 'C') ${planCond}
-                GROUP BY CAST(PostDate AS DATE)
-            ) p
-            FULL OUTER JOIN (
-                SELECT CAST(DocDate AS DATE) as DateValue, SUM(Quantity) as ActualQty
-                FROM LDS_LIVE.dbo.IGN1
-                WHERE BaseType = 202 ${actualCond}
-                GROUP BY CAST(DocDate AS DATE)
-            ) a ON p.DateValue = a.DateValue
-            ORDER BY Date
+            ;WITH PlannedOrders AS (
+              SELECT DISTINCT 
+                a.DocNum AS PO,
+                a.PlannedQty,
+                CAST(a.PostDate AS DATE) AS CreateDate
+              FROM LDS_LIVE.dbo.AWOR a
+              JOIN LDS_LIVE.dbo.OWOR b ON a.DocNum = b.DocNum AND b.PlannedQty = a.PlannedQty
+              WHERE a.Status <> 'P' AND a.CmpltQty = 0.00 ${planCond}
+            ),
+            ReceiptOrders AS (
+              SELECT
+                r.BaseRef AS PONo,
+                SUM(r.Quantity) AS ActualQty
+              FROM LDS_LIVE.dbo.IGN1 r
+              WHERE r.BaseType = 202 AND r.TranType = 'C' ${actualCond}
+              GROUP BY r.BaseRef
+            )
+            SELECT 
+              p.CreateDate AS Date,
+              SUM(p.PlannedQty) AS PlannedQty,
+              SUM(ISNULL(r.ActualQty, 0)) AS ActualQty
+            FROM PlannedOrders p
+            JOIN ReceiptOrders r ON CAST(p.PO AS NVARCHAR) = r.PONo
+            GROUP BY p.CreateDate
+            ORDER BY Date ASC
         `;
         const result = await request.query(optimizedTrendQuery);
 
