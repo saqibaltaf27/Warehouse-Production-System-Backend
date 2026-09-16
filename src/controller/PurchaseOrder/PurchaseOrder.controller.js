@@ -4,7 +4,6 @@ const axios = require("axios");
 
 const PURCHASE_REQUEST_API =
   "http://115.186.130.76:7206/api/PurchaseRequest/Create";
-
 class PurchaseOrderController {
   static async getPurchaseRequests(req, res) {
     try {
