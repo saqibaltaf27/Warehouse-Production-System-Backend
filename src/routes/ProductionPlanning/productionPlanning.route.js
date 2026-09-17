@@ -8,7 +8,11 @@ const {
     getProductionPlans,
     createProductionPlan,
     updateProductionPlan,
-    getMachines
+    getMachines,
+    createManEfficiency,
+    getManEfficiency,
+    createMachineEfficiency,
+    getMachineEfficiency
 } = require('../../controller/ProductionPlanning/productionPlanning.controller');
 const {
     getProductHistory,
@@ -29,6 +33,14 @@ router.get('/machines', getMachines);
 router.get('/plans', getProductionPlans);
 router.post('/plan', createProductionPlan);
 router.put('/plan/:id', updateProductionPlan);
+
+// Man Efficiency Routes
+router.get('/man-efficiency', getManEfficiency);
+router.post('/man-efficiency', createManEfficiency);
+
+// Machine Efficiency Routes
+router.get('/machine-efficiency', getMachineEfficiency);
+router.post('/machine-efficiency', createMachineEfficiency);
 
 // New Routes
 router.get('/history', getProductHistory);

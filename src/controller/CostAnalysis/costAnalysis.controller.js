@@ -295,64 +295,122 @@ exports.getOrderMaterials = async (req, res) => {
     const pool = await poolPromise;
     
     const query = `
-      WITH ActualIssues AS (
-        SELECT BaseEntry, BaseLine, ItemCode, SUM(Quantity) as ActualQty, SUM(LineTotal) as ActualCost
-        FROM LDS_LIVE.dbo.IGE1
-        WHERE BaseType = 202 AND BaseEntry = @docEntry
-        GROUP BY BaseEntry, BaseLine, ItemCode
-      ),
-      OrderLines AS (
-        SELECT 
-          w.DocEntry,
-          w.LineNum,
-          w.ItemCode,
-          w.ItemType,
-          ISNULL(r.ResType, 'I') as ResType,
-          w.PlannedQty,
-          ISNULL(a.ActualQty, 0) as ActualQty,
-          ISNULL(CASE WHEN w.ItemType = 290 THEN r.StdCost1 ELSE ISNULL(Mat.UnitCost, 0) END, 0) as PlannedPrice,
-          (CASE 
-             WHEN w.ItemType = 290 THEN (CASE WHEN ISNULL(a.ActualQty, 0) > 0 THEN ISNULL(a.ActualCost, 0) / a.ActualQty ELSE 0 END)
-             ELSE ISNULL(Mat.UnitCost, 0)
-           END) as ActualPrice,
-          (CASE 
-             WHEN w.ItemType = 290 THEN ISNULL(a.ActualCost, 0)
-             ELSE ISNULL(a.ActualQty, 0) * ISNULL(Mat.UnitCost, 0)
-           END) as ActualCost
-        FROM LDS_LIVE.dbo.WOR1 w
-        LEFT JOIN LDS_LIVE.dbo.ORSC r ON w.ItemCode = r.ResCode AND w.ItemType = 290
-        LEFT JOIN ActualIssues a ON w.DocEntry = a.BaseEntry AND w.LineNum = a.BaseLine AND w.ItemCode = a.ItemCode
-        OUTER APPLY (
-          SELECT TOP 1 CASE WHEN T0.InQty > 0 THEN T0.TransValue / T0.InQty ELSE 0 END AS UnitCost
+      SELECT
+          P.DocNum AS [Production Order],
+          CASE
+              WHEN W.ItemType = 290 THEN 'Resource'
+              ELSE 'Item'
+          END AS [Type],
+          W.ItemCode,
+          ISNULL(M.ItemName, R.ResName) AS [Item Description],
+          W.PlannedQty,
+          CAST(
+              CASE
+                  WHEN W.ItemType <> 290 THEN 
+                      ISNULL((
+                          SELECT TOP 1 (ABS(N.TransValue) / NULLIF(I.Quantity, 0))
+                          FROM LDS_LIVE.dbo.IGE1 I
+                          INNER JOIN LDS_LIVE.dbo.OIGE G ON G.DocEntry = I.DocEntry
+                          INNER JOIN LDS_LIVE.dbo.OINM N ON N.TransType = 60 AND N.CreatedBy = G.DocEntry AND N.DocLineNum = I.LineNum AND N.ItemCode = I.ItemCode
+                          WHERE I.BaseEntry = P.DocEntry AND I.BaseType = 202 AND I.ItemCode = W.ItemCode
+                      ), ISNULL(Mat.UnitCost, 0))
+                  ELSE 
+                      ISNULL((
+                          SELECT TOP 1 I.Price
+                          FROM LDS_LIVE.dbo.IGE1 I
+                          WHERE I.BaseEntry = P.DocEntry AND I.BaseType = 202 AND I.ItemCode = W.ItemCode
+                      ), R.StdCost1)
+              END
+              AS DECIMAL(19,6)
+          ) AS [Item Cost]
+      FROM LDS_LIVE.dbo.OWOR P
+      INNER JOIN LDS_LIVE.dbo.WOR1 W ON P.DocEntry = W.DocEntry
+      LEFT JOIN LDS_LIVE.dbo.OITM M ON W.ItemCode = M.ItemCode AND W.ItemType <> 290
+      LEFT JOIN LDS_LIVE.dbo.ORSC R ON W.ItemCode = R.ResCode AND W.ItemType = 290
+      OUTER APPLY (
+          SELECT TOP 1 CASE WHEN T0.InQty > 0 THEN ABS(T0.TransValue) / T0.InQty ELSE 0 END AS UnitCost
           FROM LDS_LIVE.dbo.OINM T0
-          WHERE T0.ItemCode = w.ItemCode AND T0.InQty > 0 AND w.ItemType <> 290
+          WHERE T0.ItemCode = W.ItemCode AND T0.InQty > 0 AND W.ItemType <> 290
           ORDER BY T0.DocDate DESC, T0.TransSeq DESC
-        ) as Mat
-        WHERE w.DocEntry = @docEntry
-      )
-      SELECT 
-        LineNum,
-        ItemCode,
-        ItemType,
-        ResType,
-        PlannedQty,
-        PlannedPrice,
-        (PlannedQty * PlannedPrice) as PlannedCost,
-        ActualQty,
-        ActualPrice,
-        ActualCost,
-        (ActualCost - (PlannedQty * PlannedPrice)) as TotalVariance,
-        ((ActualQty - PlannedQty) * PlannedPrice) as UsageVariance,
-        ((ActualPrice - PlannedPrice) * ActualQty) as PriceVariance
-      FROM OrderLines
-      ORDER BY ItemType, LineNum
+      ) as Mat
+      WHERE P.DocEntry = @docEntry
     `;
     
     const request = pool.request();
     request.input('docEntry', sql.Int, docEntry);
-    const result = await request.query(query);
     
-    res.status(200).json({ success: true, data: result.recordset });
+    const result = await request.query(query);
+
+    // Fetch staff for this PO
+    let staffDetails = [];
+    try {
+      const docNumQuery = await pool.request()
+        .input('docEntry', sql.Int, docEntry)
+        .query("SELECT DocNum FROM LDS_LIVE.dbo.OWOR WHERE DocEntry = @docEntry");
+      
+      if (docNumQuery.recordset.length > 0) {
+        const docNum = docNumQuery.recordset[0].DocNum;
+        
+        const staffQuery = await pool.request()
+          .input('docNum', sql.VarChar, String(docNum))
+          .query("SELECT PlanDate, Persons FROM Dome.dbo.PmsProductionPlanning WHERE PO = @docNum");
+
+        let staffAgg = {}; // { StaffID: { totalHours: 0, dates: Set() } }
+        
+        staffQuery.recordset.forEach(row => {
+          if (row.Persons) {
+            try {
+              const persons = JSON.parse(row.Persons);
+              if (Array.isArray(persons)) {
+                persons.forEach(p => {
+                  if (p.StaffID) {
+                    if (!staffAgg[p.StaffID]) {
+                      staffAgg[p.StaffID] = { totalHours: 0, dates: new Set() };
+                    }
+                    if (p.hours) {
+                      staffAgg[p.StaffID].totalHours += (parseFloat(p.hours) || 0);
+                    }
+                    if (row.PlanDate) {
+                      const dateStr = new Date(row.PlanDate).toISOString().split('T')[0];
+                      staffAgg[p.StaffID].dates.add(dateStr);
+                    }
+                  }
+                });
+              }
+            } catch (e) {
+              console.error("Error parsing Persons JSON", e);
+            }
+          }
+        });
+
+        const staffIds = Object.keys(staffAgg);
+        if (staffIds.length > 0) {
+          const idsString = staffIds.join(',');
+          const detailsQuery = await pool.request()
+            .query(`SELECT StaffID, Name, Designation, WageSalary FROM Dome.dbo.PMSStaff WHERE StaffID IN (${idsString})`);
+          
+          staffDetails = detailsQuery.recordset.map(s => {
+            const agg = staffAgg[s.StaffID];
+            const totalHours = agg ? agg.totalHours : 0;
+            const daysWorked = agg ? agg.dates.size : 0;
+            let cost = 0;
+            if (totalHours > 0) {
+              cost = ((parseFloat(s.WageSalary) || 0) / 8) * totalHours;
+            }
+            return {
+              ...s,
+              TotalHours: totalHours,
+              DaysWorked: daysWorked,
+              CalculatedCost: cost
+            };
+          });
+        }
+      }
+    } catch (staffError) {
+      console.error("Error fetching staff for PO:", staffError);
+    }
+
+    res.status(200).json({ success: true, data: result.recordset, staff: staffDetails });
   } catch (error) {
     console.error("Error in getOrderMaterials:", error);
     res.status(500).json({ success: false, message: error.message });

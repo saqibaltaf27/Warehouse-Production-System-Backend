@@ -18,6 +18,7 @@ const aclRoutes = require("./routes/ACL/acl.route");
 const pmRoutes = require("./routes/PreventiveMaintenance/pm.route");
 const machineRoutes = require("./routes/Machine/machine.route");
 const purchaseOrderRoutes = require("./routes/PurchaseOrder/PurchaseOrder.route");
+const staffRoutes = require("./routes/Staff/staff.route");
 const app = express();
 
 applySecurityAndMiddlewares(app);
@@ -43,6 +44,8 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+const coaTemplateRoutes = require("./routes/QC/coaTemplate.route");
+
 app.use("/api/auth", authRoutes);
 app.use("/api/machine-efficiency", productionRoutes);
 app.use("/api/production-trend", productionTrendRoutes);
@@ -57,6 +60,8 @@ app.use("/api/acl", aclRoutes);
 app.use("/api/pms", pmRoutes);
 app.use("/api/machine", machineRoutes);
 app.use("/api/purchase-order", purchaseOrderRoutes);
+app.use("/api/staff", staffRoutes);
+app.use("/api/coa-template", coaTemplateRoutes);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;

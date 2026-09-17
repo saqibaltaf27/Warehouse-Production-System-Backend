@@ -264,6 +264,8 @@ const getProductionPlans = async (req, res) => {
     const query = `
       SELECT 
         p.Id, p.PlanDate, p.Line, p.Machine, p.Supervisor, p.PO, p.Persons, p.CreatedAt,
+        p.Shift, p.PlannedManpower, p.ActualManpower, p.WorkingHours, p.ProductionQty, 
+        p.TotalManHour, p.UnitsPerManHour, p.StdUnitsPerManHour, p.PrdPercentage, p.Remarks,
         ISNULL(o.PlannedQty, 0) AS PlannedQty,
         ISNULL(o.CmpltQty, 0) AS CmpltQty
       FROM Dome.dbo.PmsProductionPlanning p
@@ -290,7 +292,12 @@ const getProductionPlans = async (req, res) => {
 
 const createProductionPlan = async (req, res) => {
   try {
-    const { date, line, machine, supervisor, po, jdItems } = req.body;
+    const { 
+      date, line, machineItems, supervisor, po, jdItems,
+      shift, plannedManpower, actualManpower, workingHours,
+      productionQty, totalManHour, unitsPerManHour,
+      stdUnitsPerManHour, prdPercentage, remarks
+    } = req.body;
     
     if (!date || !line) {
       return res.status(400).json({ success: false, message: "Date and Line are required" });
@@ -298,14 +305,22 @@ const createProductionPlan = async (req, res) => {
 
     const pool = await poolPromise;
     const personsJson = JSON.stringify(jdItems || []);
+    // Ensure we handle backwards compatibility if old `machine` string comes through, but we prefer `machineItems` array
+    const machineJson = req.body.machine ? req.body.machine : JSON.stringify(machineItems || []);
 
     const insertQuery = `
       BEGIN TRAN;
       DECLARE @NextId INT;
       SELECT @NextId = ISNULL(MAX(Id), 0) + 1 FROM Dome.dbo.PmsProductionPlanning WITH (UPDLOCK, ROWLOCK);
       
-      INSERT INTO Dome.dbo.PmsProductionPlanning (Id, PlanDate, Line, Machine, Supervisor, PO, Persons, CreatedAt)
-      VALUES (@NextId, @PlanDate, @Line, @Machine, @Supervisor, @PO, @Persons, GETDATE());
+      INSERT INTO Dome.dbo.PmsProductionPlanning (
+        Id, PlanDate, Line, Machine, Supervisor, PO, Persons, CreatedAt,
+        Shift, PlannedManpower, ActualManpower, WorkingHours, ProductionQty, TotalManHour, UnitsPerManHour, StdUnitsPerManHour, PrdPercentage, Remarks
+      )
+      VALUES (
+        @NextId, @PlanDate, @Line, @Machine, @Supervisor, @PO, @Persons, GETDATE(),
+        @Shift, @PlannedManpower, @ActualManpower, @WorkingHours, @ProductionQty, @TotalManHour, @UnitsPerManHour, @StdUnitsPerManHour, @PrdPercentage, @Remarks
+      );
       
       SELECT @NextId AS NextId;
       COMMIT TRAN;
@@ -314,10 +329,20 @@ const createProductionPlan = async (req, res) => {
     const result = await pool.request()
       .input('PlanDate', date)
       .input('Line', line)
-      .input('Machine', machine || null)
+      .input('Machine', machineJson)
       .input('Supervisor', supervisor || null)
       .input('PO', po || null)
       .input('Persons', personsJson)
+      .input('Shift', shift || null)
+      .input('PlannedManpower', plannedManpower || null)
+      .input('ActualManpower', actualManpower || null)
+      .input('WorkingHours', workingHours || null)
+      .input('ProductionQty', productionQty || null)
+      .input('TotalManHour', totalManHour || null)
+      .input('UnitsPerManHour', unitsPerManHour || null)
+      .input('StdUnitsPerManHour', stdUnitsPerManHour || null)
+      .input('PrdPercentage', prdPercentage || null)
+      .input('Remarks', remarks || null)
       .query(insertQuery);
 
     const nextId = result.recordset[0].NextId;
@@ -336,7 +361,12 @@ const createProductionPlan = async (req, res) => {
 const updateProductionPlan = async (req, res) => {
   try {
     const { id } = req.params;
-    const { date, line, machine, supervisor, po, jdItems } = req.body;
+    const { 
+      date, line, machineItems, supervisor, po, jdItems,
+      shift, plannedManpower, actualManpower, workingHours,
+      productionQty, totalManHour, unitsPerManHour,
+      stdUnitsPerManHour, prdPercentage, remarks
+    } = req.body;
     
     if (!id || !date || !line) {
       return res.status(400).json({ success: false, message: "ID, Date and Line are required" });
@@ -344,6 +374,7 @@ const updateProductionPlan = async (req, res) => {
 
     const pool = await poolPromise;
     const personsJson = JSON.stringify(jdItems || []);
+    const machineJson = req.body.machine ? req.body.machine : JSON.stringify(machineItems || []);
 
     const updateQuery = `
       UPDATE Dome.dbo.PmsProductionPlanning
@@ -352,7 +383,17 @@ const updateProductionPlan = async (req, res) => {
           Machine = @Machine,
           Supervisor = @Supervisor,
           PO = @PO,
-          Persons = @Persons
+          Persons = @Persons,
+          Shift = @Shift,
+          PlannedManpower = @PlannedManpower,
+          ActualManpower = @ActualManpower,
+          WorkingHours = @WorkingHours,
+          ProductionQty = @ProductionQty,
+          TotalManHour = @TotalManHour,
+          UnitsPerManHour = @UnitsPerManHour,
+          StdUnitsPerManHour = @StdUnitsPerManHour,
+          PrdPercentage = @PrdPercentage,
+          Remarks = @Remarks
       WHERE Id = @Id
     `;
 
@@ -360,10 +401,20 @@ const updateProductionPlan = async (req, res) => {
       .input('Id', id)
       .input('PlanDate', date)
       .input('Line', line)
-      .input('Machine', machine || null)
+      .input('Machine', machineJson)
       .input('Supervisor', supervisor || null)
       .input('PO', po || null)
       .input('Persons', personsJson)
+      .input('Shift', shift || null)
+      .input('PlannedManpower', plannedManpower || null)
+      .input('ActualManpower', actualManpower || null)
+      .input('WorkingHours', workingHours || null)
+      .input('ProductionQty', productionQty || null)
+      .input('TotalManHour', totalManHour || null)
+      .input('UnitsPerManHour', unitsPerManHour || null)
+      .input('StdUnitsPerManHour', stdUnitsPerManHour || null)
+      .input('PrdPercentage', prdPercentage || null)
+      .input('Remarks', remarks || null)
       .query(updateQuery);
 
     res.json({
@@ -398,6 +449,132 @@ const getMachines = async (req, res) => {
   }
 };
 
+const getManEfficiency = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `
+      SELECT Id, Name, ProductionLine, Hour, Qty, CreatedDate, CreatedBy 
+      FROM Dome.dbo.PMSManEfficiency 
+      ORDER BY CreatedDate DESC
+    `;
+    const result = await pool.request().query(query);
+    
+    res.json({
+      success: true,
+      data: result.recordset
+    });
+  } catch (error) {
+    console.error("Error in getManEfficiency:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch man efficiency records" });
+  }
+};
+
+const createManEfficiency = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const { name, productionLine, hours, qty, createdBy } = req.body;
+
+    const transaction = pool.transaction();
+    await transaction.begin();
+
+    try {
+      const idQuery = `SELECT ISNULL(MAX(Id), 0) + 1 AS NextId FROM Dome.dbo.PMSManEfficiency WITH (UPDLOCK, HOLDLOCK)`;
+      const idResult = await transaction.request().query(idQuery);
+      const nextId = idResult.recordset[0].NextId;
+
+      const insertQuery = `
+        INSERT INTO Dome.dbo.PMSManEfficiency (Id, Name, ProductionLine, Hour, Qty, CreatedBy)
+        VALUES (@Id, @Name, @ProductionLine, @Hour, @Qty, @CreatedBy)
+      `;
+      
+      await transaction.request()
+        .input('Id', nextId)
+        .input('Name', name)
+        .input('ProductionLine', productionLine)
+        .input('Hour', hours)
+        .input('Qty', qty)
+        .input('CreatedBy', createdBy || null)
+        .query(insertQuery);
+
+      await transaction.commit();
+
+      res.json({
+        success: true,
+        message: "Man efficiency created successfully"
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
+  } catch (error) {
+    console.error("Error in createManEfficiency:", error);
+    res.status(500).json({ success: false, message: "Failed to create man efficiency record" });
+  }
+};
+
+const getMachineEfficiency = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `
+      SELECT Id, ItemCode, Machine, TotalHours, TotalQuantityProduced, CreatedDate, CreatedBy 
+      FROM Dome.dbo.PMSMachineEfficiency 
+      ORDER BY CreatedDate DESC
+    `;
+    const result = await pool.request().query(query);
+    
+    res.json({
+      success: true,
+      data: result.recordset
+    });
+  } catch (error) {
+    console.error("Error in getMachineEfficiency:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch machine efficiency records" });
+  }
+};
+
+const createMachineEfficiency = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const { itemCode, machine, totalHours, totalQuantityProduced, createdBy } = req.body;
+
+    const transaction = pool.transaction();
+    await transaction.begin();
+
+    try {
+      const idQuery = `SELECT ISNULL(MAX(Id), 0) + 1 AS NextId FROM Dome.dbo.PMSMachineEfficiency WITH (UPDLOCK, HOLDLOCK)`;
+      const idResult = await transaction.request().query(idQuery);
+      const nextId = idResult.recordset[0].NextId;
+
+      const insertQuery = `
+        INSERT INTO Dome.dbo.PMSMachineEfficiency (Id, ItemCode, Machine, TotalHours, TotalQuantityProduced, CreatedBy)
+        VALUES (@Id, @ItemCode, @Machine, @TotalHours, @TotalQuantityProduced, @CreatedBy)
+      `;
+      
+      await transaction.request()
+        .input('Id', nextId)
+        .input('ItemCode', itemCode)
+        .input('Machine', machine)
+        .input('TotalHours', totalHours)
+        .input('TotalQuantityProduced', totalQuantityProduced)
+        .input('CreatedBy', createdBy || null)
+        .query(insertQuery);
+
+      await transaction.commit();
+
+      res.json({
+        success: true,
+        message: "Machine efficiency created successfully"
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
+  } catch (error) {
+    console.error("Error in createMachineEfficiency:", error);
+    res.status(500).json({ success: false, message: "Failed to create machine efficiency record" });
+  }
+};
+
 module.exports = {
   getExecutiveKPIs,
   getMaterialShortages,
@@ -406,6 +583,10 @@ module.exports = {
   getProductionPlans,
   createProductionPlan,
   updateProductionPlan,
-  getMachines
+  getMachines,
+  createManEfficiency,
+  getManEfficiency,
+  createMachineEfficiency,
+  getMachineEfficiency
 };
 
