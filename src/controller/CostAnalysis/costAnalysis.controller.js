@@ -242,6 +242,7 @@ exports.getProductionOrders = async (req, res) => {
         o.DocEntry,
         o.DocNum,
         o.ItemCode as FGItemCode,
+        o.ProdName as FGItemName,
         o.Status,
         o.PostDate,
         o.Warehouse,
@@ -413,6 +414,23 @@ exports.getOrderMaterials = async (req, res) => {
     res.status(200).json({ success: true, data: result.recordset, staff: staffDetails });
   } catch (error) {
     console.error("Error in getOrderMaterials:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getOrderStatuses = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `
+      SELECT DISTINCT Status 
+      FROM LDS_LIVE.dbo.OWOR
+      WHERE Status IS NOT NULL
+    `;
+    const result = await pool.request().query(query);
+    const statuses = result.recordset.map(r => r.Status);
+    res.status(200).json({ success: true, data: statuses });
+  } catch (error) {
+    console.error("Error in getOrderStatuses:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

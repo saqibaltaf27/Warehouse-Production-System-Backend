@@ -39,7 +39,7 @@ exports.getProductionOrderDetails = async (req, res) => {
           ) AS [UoMName],
           
           H.Warehouse AS [Warehouse],
-          'Diagnostic' AS [Branch],
+          NULL AS [Branch],
           H.Priority AS [Priority],
           
           CASE H.RouDatCalc
@@ -162,7 +162,7 @@ exports.getProductionOrderDetails = async (req, res) => {
           L.WipActCode AS [WIPAccount],
           L.OcrCode AS [Department],
           L.OcrCode2 AS [BusinessSegment],
-          'Diagnostic' AS [Branch],
+          NULL AS [Branch],
           ISNULL(L.StageId, 0) AS [RouteSequence],
           
           CASE
@@ -441,7 +441,7 @@ exports.getProductionOrderDetailsByDocNum = async (req, res) => {
           ) AS [UoMName],
           
           H.Warehouse AS [Warehouse],
-          'Diagnostic' AS [Branch],
+          NULL AS [Branch],
           H.Priority AS [Priority],
           
           CASE H.RouDatCalc
@@ -554,7 +554,7 @@ exports.getProductionOrderDetailsByDocNum = async (req, res) => {
           L.WipActCode AS [WIPAccount],
           L.OcrCode AS [Department],
           L.OcrCode2 AS [BusinessSegment],
-          'Diagnostic' AS [Branch],
+          NULL AS [Branch],
           ISNULL(L.StageId, 0) AS [RouteSequence],
           
           CASE
@@ -642,7 +642,8 @@ exports.getBOMDetails = async (req, res) => {
           1 AS [PlannedQuantity],
           I.InvntryUom AS [UoMName],
           '04' AS [Warehouse],
-          'Diagnostic' AS [Branch],
+          NULL AS [Branch],
+          100 AS [Priority],
           GETDATE() AS [OrderDate],
           GETDATE() AS [StartDate],
           GETDATE() AS [DueDate],
@@ -713,7 +714,7 @@ exports.getBOMDetails = async (req, res) => {
           L.WipActCode AS [WIPAccount],
           NULL AS [Department],
           NULL AS [BusinessSegment],
-          'Diagnostic' AS [Branch],
+          NULL AS [Branch],
           0 AS [RouteSequence],
           NULL AS [ProcurementDoc],
           'No' AS [AllowProcurmtDoc]

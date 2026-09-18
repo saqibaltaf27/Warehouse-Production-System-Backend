@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const costAnalysisController = require('../controller/CostAnalysis/costAnalysis.controller');
 
+// GET Distinct Statuses
+router.get('/statuses', costAnalysisController.getOrderStatuses);
+
 // GET Summary KPIs
 router.get('/summary', costAnalysisController.getSummaryKPIs);
 

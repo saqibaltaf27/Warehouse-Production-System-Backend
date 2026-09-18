@@ -139,7 +139,16 @@ class PurchaseOrderController {
       });
 
       console.log("External API response:", response.status, response.data);
-      sendSuccess(res, response.data, "Purchase request created successfully");
+
+      const data = response.data;
+      const isExternalSuccess = response.status === 200 && (data?.Success !== false && data?.success !== false);
+      const errorMessage = data?.Message || data?.message || "Failed to create purchase request from external API.";
+
+      if (isExternalSuccess) {
+        sendSuccess(res, data, "Purchase request created successfully");
+      } else {
+        sendError(res, errorMessage, 400);
+      }
     } catch (err) {
       console.error(
         "Purchase Request creation failed:",
