@@ -181,3 +181,275 @@ exports.getQualityRecordDetails = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+exports.getItems = async (req, res) => {
+  try {
+    const { search = '' } = req.query;
+    const pool = await poolPromise;
+    const request = pool.request();
+    
+    request.input('search', sql.NVarChar, `%${search}%`);
+    
+    let query = `
+      SELECT 
+        ItemCode, 
+        ItemName 
+      FROM LDS_live.dbo.OITM
+    `;
+
+    if (search) {
+      query += ` WHERE ItemCode LIKE @search OR ItemName LIKE @search`;
+    }
+
+    const dataResult = await request.query(query);
+    
+    res.json({
+      success: true,
+      data: dataResult.recordset
+    });
+  } catch (err) {
+    console.error("Error in getItems:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getItemByCode = async (req, res) => {
+  try {
+    const { itemCode } = req.query;
+    if (!itemCode) {
+      return res.status(400).json({ success: false, message: 'ItemCode is required' });
+    }
+    
+    const pool = await poolPromise;
+    const request = pool.request();
+    
+    request.input('ItemCode', sql.NVarChar, itemCode);
+    
+    const query = `
+      SELECT * 
+      FROM [DOME].[dbo].[@XD_OITS]
+      WHERE U_ItemCode = @ItemCode
+    `;
+
+    const dataResult = await request.query(query);
+    
+    if (dataResult.recordset.length === 0) {
+      return res.status(404).json({ success: false, message: 'Item not found in @XD_OITS' });
+    }
+    
+    const headerData = dataResult.recordset[0];
+    const docEntry = headerData.DocEntry;
+
+    request.input('DocEntry', sql.Int, docEntry);
+    const linesQuery = `
+      SELECT *
+      FROM [DOME].[dbo].[@XD_ITS1]
+      WHERE DocEntry = @DocEntry
+      ORDER BY LineId
+    `;
+    const linesResult = await request.query(linesQuery);
+    
+    res.json({
+      success: true,
+      data: headerData,
+      lines: linesResult.recordset
+    });
+  } catch (err) {
+    console.error("Error in getItemByCode:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getEquipments = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const request = pool.request();
+    
+    const query = `
+      SELECT DISTINCT 
+          U_EqpCode,
+          U_EqpName
+      FROM [DOME].[dbo].[@XD_ITS1]
+      WHERE U_EqpCode IS NOT NULL AND RTRIM(LTRIM(U_EqpCode)) <> ''
+      ORDER BY U_EqpName ASC;
+    `;
+
+    const dataResult = await request.query(query);
+    
+    res.json({
+      success: true,
+      data: dataResult.recordset
+    });
+  } catch (err) {
+    console.error("Error in getEquipments:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getNextDocEntry = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const request = pool.request();
+    
+    const query = `
+      SELECT ISNULL(MAX(DocEntry), 0) + 1 AS NextDocEntry
+      FROM [DOME].[dbo].[@XD_OQUL]
+    `;
+
+    const dataResult = await request.query(query);
+    
+    res.json({
+      success: true,
+      nextDocEntry: dataResult.recordset[0].NextDocEntry
+    });
+  } catch (err) {
+    console.error("Error in getNextDocEntry:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getItemBatches = async (req, res) => {
+  try {
+    const { itemCode } = req.query;
+    if (!itemCode) {
+      return res.status(400).json({ success: false, message: 'ItemCode is required' });
+    }
+
+    const pool = await poolPromise;
+    const request = pool.request();
+    request.input('itemCode', sql.NVarChar, itemCode);
+    
+    const query = `
+      SELECT 
+          DistNumber AS BatchSerial, 
+          Quantity AS Qty, 
+          'Batch' AS ManageType,
+          MnfDate,
+          ExpDate
+      FROM LDS_LIVE.dbo.OBTN 
+      WHERE ItemCode = @itemCode
+      UNION ALL
+      SELECT 
+          DistNumber AS BatchSerial, 
+          Quantity AS Qty, 
+          'Serial' AS ManageType,
+          MnfDate,
+          ExpDate
+      FROM LDS_LIVE.dbo.OSRN 
+      WHERE ItemCode = @itemCode
+    `;
+
+    const dataResult = await request.query(query);
+    
+    res.json({
+      success: true,
+      data: dataResult.recordset
+    });
+  } catch (err) {
+    console.error("Error in getItemBatches:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.createQualityRecord = async (req, res) => {
+  try {
+    const data = req.body;
+    const pool = await poolPromise;
+    const request = pool.request();
+    
+    // Get next DocEntry and DocNum
+    const docEntryResult = await request.query(`SELECT ISNULL(MAX(DocEntry), 0) + 1 AS NextDocEntry FROM [DOME].[dbo].[@XD_OQUL]`);
+    const docEntry = docEntryResult.recordset[0].NextDocEntry;
+    
+    // Begin transaction
+    const transaction = new sql.Transaction(pool);
+    await transaction.begin();
+    
+    try {
+      const txRequest = new sql.Request(transaction);
+      
+      // INSERT into Header Table [@XD_OQUL]
+      txRequest.input('DocEntry', sql.Int, docEntry);
+      txRequest.input('DocNum', sql.Int, docEntry); // Assuming DocNum is same as DocEntry for custom tables usually
+      txRequest.input('U_QCType', sql.NVarChar, data.qcType || 'S'); // 'B' for Based on Document, 'S' for Standalone
+      txRequest.input('U_Type', sql.NVarChar, data.type || 'M'); // 'M' Material or 'P' Process
+      txRequest.input('U_ItemCode', sql.NVarChar, data.itemCode);
+      txRequest.input('U_ItemName', sql.NVarChar, data.itemName);
+      txRequest.input('U_SmpQty', sql.Numeric, data.sampleQty ? parseFloat(data.sampleQty) : null);
+      txRequest.input('U_Batch', sql.NVarChar, data.selectedBatch);
+      txRequest.input('U_Qty', sql.Numeric, data.batchQty ? parseFloat(data.batchQty) : null);
+      txRequest.input('U_ExpDate', sql.Date, data.batchExpDate ? new Date(data.batchExpDate) : null);
+      txRequest.input('CreateDate', sql.DateTime, new Date());
+      // Auth context mappings
+      txRequest.input('U_InpBy', sql.NVarChar, data.empId || null);
+      txRequest.input('U_InpByName', sql.NVarChar, data.empName || null);
+
+      const insertHeaderQuery = `
+        INSERT INTO [DOME].[dbo].[@XD_OQUL] (
+          DocEntry, DocNum, U_QCType, U_Type, U_ItemCode, U_ItemName, 
+          U_SmpQty, U_Batch, U_Qty, U_ExpDate, CreateDate, U_InpBy, U_InpByName
+        ) VALUES (
+          @DocEntry, @DocNum, @U_QCType, @U_Type, @U_ItemCode, @U_ItemName, 
+          @U_SmpQty, @U_Batch, @U_Qty, @U_ExpDate, @CreateDate, @U_InpBy, @U_InpByName
+        )
+      `;
+      
+      await txRequest.query(insertHeaderQuery);
+
+      // INSERT into Lines Table [@XD_QUL1]
+      if (data.lines && data.lines.length > 0) {
+        for (let i = 0; i < data.lines.length; i++) {
+          const line = data.lines[i];
+          const lineRequest = new sql.Request(transaction);
+          
+          lineRequest.input('DocEntry', sql.Int, docEntry);
+          lineRequest.input('LineId', sql.Int, i + 1);
+          lineRequest.input('U_PrmCode', sql.NVarChar, line['Parameter Code']);
+          lineRequest.input('U_PrmName', sql.NVarChar, line['Parameter Name']);
+          lineRequest.input('U_Action', sql.NVarChar, line['Action']);
+          lineRequest.input('U_Criteria', sql.NVarChar, line['Criteria']);
+          lineRequest.input('U_EqpCode', sql.NVarChar, line['Equipment Code']);
+          lineRequest.input('U_EqpName', sql.NVarChar, line['Equipment Name']);
+          lineRequest.input('U_Uom', sql.NVarChar, line['UOM']);
+          lineRequest.input('U_StdValue', sql.NVarChar, line['Std Value']);
+          lineRequest.input('U_MinValue', sql.NVarChar, line['Min Value']);
+          lineRequest.input('U_MaxValue', sql.NVarChar, line['Max Value']);
+          lineRequest.input('U_Type', sql.NVarChar, line['Type'] || line['Parameter Type']);
+          lineRequest.input('U_ObValue1', sql.NVarChar, line['Observed Value 1']);
+          lineRequest.input('U_ObValue2', sql.NVarChar, line['Observed Value 2']);
+          lineRequest.input('U_ObValue3', sql.NVarChar, line['Observed Value 3']);
+          
+          const insertLineQuery = `
+            INSERT INTO [DOME].[dbo].[@XD_QUL1] (
+              DocEntry, LineId, U_PrmCode, U_PrmName, U_Action, U_Criteria,
+              U_EqpCode, U_EqpName, U_Uom, U_StdValue, U_MinValue, U_MaxValue,
+              U_Type, U_ObValue1, U_ObValue2, U_ObValue3
+            ) VALUES (
+              @DocEntry, @LineId, @U_PrmCode, @U_PrmName, @U_Action, @U_Criteria,
+              @U_EqpCode, @U_EqpName, @U_Uom, @U_StdValue, @U_MinValue, @U_MaxValue,
+              @U_Type, @U_ObValue1, @U_ObValue2, @U_ObValue3
+            )
+          `;
+          
+          await lineRequest.query(insertLineQuery);
+        }
+      }
+
+      await transaction.commit();
+      
+      res.json({
+        success: true,
+        message: 'Quality record created successfully',
+        docEntry: docEntry
+      });
+      
+    } catch (txErr) {
+      await transaction.rollback();
+      throw txErr;
+    }
+    
+  } catch (err) {
+    console.error("Error in createQualityRecord:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
