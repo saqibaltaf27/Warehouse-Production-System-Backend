@@ -104,10 +104,10 @@ exports.getOpenDocuments = async (req, res) => {
     if (search) {
       request.input('search', sql.NVarChar, `%${search}%`);
       if (hasSupplier) {
-        searchCondition = `AND (DocNum LIKE @search OR CardCode LIKE @search OR CardName LIKE @search)`;
+        searchCondition = `AND (CAST(DocNum AS VARCHAR(50)) LIKE @search OR CardCode LIKE @search OR CardName LIKE @search)`;
       } else {
         // Search by ItemCode or ItemName for Receipt from production via EXISTS subquery
-        searchCondition = `AND (DocNum LIKE @search OR EXISTS (SELECT 1 FROM LDS_LIVE.dbo.IGN1 L WHERE L.DocEntry = LDS_LIVE.dbo.${tableName}.DocEntry AND (L.ItemCode LIKE @search OR L.Dscription LIKE @search)))`;
+        searchCondition = `AND (CAST(DocNum AS VARCHAR(50)) LIKE @search OR EXISTS (SELECT 1 FROM LDS_LIVE.dbo.IGN1 L WHERE L.DocEntry = LDS_LIVE.dbo.${tableName}.DocEntry AND (L.ItemCode LIKE @search OR L.Dscription LIKE @search)))`;
       }
     }
     
@@ -321,9 +321,11 @@ exports.getSavedSamples = async (req, res) => {
         when b.U_status = 'CA' then 'Conditionally Accepted'
         when b.U_status = 'CR' then 'Conditionally Rejected'
         when b.U_status = 'C' then 'Cancel'
+        when b.U_status = 'C' then 'Cancel'
         end as [Status],
         b.U_InvWhs as [Inventory Transfer Warehouse],
-        b.U_InvNo as [Inventory Transfer No]
+        b.U_InvNo as [Inventory Transfer No],
+        a.U_DocEntry as [Document Entry]
       from DOME.dbo.[@XD_OSMP] a
       join DOME.dbo.[@XD_SMP1] b on a.docentry = b.docentry
       ORDER BY a.Docnum DESC
@@ -404,6 +406,7 @@ exports.saveSample = async (req, res) => {
       headerRequest.input('U_SmpDate', sql.Date, header.SamplingDate ? new Date(header.SamplingDate) : new Date());
       headerRequest.input('U_Type', sql.Int, header.DocumentType);
       headerRequest.input('U_DocNum', sql.NVarChar, header.DocumentNumber ? String(header.DocumentNumber) : null);
+      headerRequest.input('U_DocEntry', sql.Int, header.DocumentEntry ? parseInt(header.DocumentEntry) : null);
       headerRequest.input('U_CardCode', sql.NVarChar, header.SupplierCode ? String(header.SupplierCode) : null);
       headerRequest.input('U_CardName', sql.NVarChar, header.SupplierName ? String(header.SupplierName) : null);
       headerRequest.input('U_BPLId', sql.Int, 1);
@@ -412,9 +415,9 @@ exports.saveSample = async (req, res) => {
 
       await headerRequest.query(`
         INSERT INTO DOME.dbo.[@XD_OSMP] 
-        (DocEntry, DocNum, U_SmpDate, U_Type, U_DocNum, U_CardCode, U_Cardname, U_BPLId, U_SmpBy, U_SmpByName)
+        (DocEntry, DocNum, U_SmpDate, U_Type, U_DocNum, U_DocEntry, U_CardCode, U_Cardname, U_BPLId, U_SmpBy, U_SmpByName)
         VALUES 
-        (@DocEntry, @DocNum, @U_SmpDate, @U_Type, @U_DocNum, @U_CardCode, @U_CardName, @U_BPLId, @U_SmpBy, @U_SmpByName)
+        (@DocEntry, @DocNum, @U_SmpDate, @U_Type, @U_DocNum, @U_DocEntry, @U_CardCode, @U_CardName, @U_BPLId, @U_SmpBy, @U_SmpByName)
       `);
 
       // 3. Insert Lines
@@ -485,6 +488,7 @@ exports.getFilteredSamples = async (req, res) => {
       when a.U_type = 16 then 'Sales Return'
       when a.U_Type = 14 then 'A/R Credit Memo'
       end as [Docnument Type],
+      a.U_DocEntry as [Document Entry],
       a.U_DocNum as [Document No],
       a.U_CardCode as [Supplier Code],
       a.U_Cardname as [Supplier Name],
