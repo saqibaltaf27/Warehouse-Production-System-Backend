@@ -342,8 +342,9 @@ exports.getOrderMaterials = async (req, res) => {
     
     const result = await request.query(query);
 
-    // Fetch staff for this PO
+    // Fetch staff and machines for this PO
     let staffDetails = [];
+    let machineDetails = [];
     try {
       const docNumQuery = await pool.request()
         .input('docEntry', sql.Int, docEntry)
@@ -352,13 +353,15 @@ exports.getOrderMaterials = async (req, res) => {
       if (docNumQuery.recordset.length > 0) {
         const docNum = docNumQuery.recordset[0].DocNum;
         
-        const staffQuery = await pool.request()
+        const planningQuery = await pool.request()
           .input('docNum', sql.VarChar, String(docNum))
-          .query("SELECT PlanDate, Persons FROM Dome.dbo.PmsProductionPlanning WHERE PO = @docNum");
+          .query("SELECT PlanDate, Persons, Machine FROM Dome.dbo.PmsProductionPlanning WHERE PO = @docNum");
 
         let staffAgg = {}; // { StaffID: { totalHours: 0, dates: Set() } }
+        let machineAgg = {}; // { MachineName: { totalHours: 0 } }
         
-        staffQuery.recordset.forEach(row => {
+        planningQuery.recordset.forEach(row => {
+          // Process Persons
           if (row.Persons) {
             try {
               const persons = JSON.parse(row.Persons);
@@ -382,7 +385,34 @@ exports.getOrderMaterials = async (req, res) => {
               console.error("Error parsing Persons JSON", e);
             }
           }
+          
+          // Process Machines
+          if (row.Machine) {
+            try {
+              const machines = JSON.parse(row.Machine);
+              if (Array.isArray(machines)) {
+                machines.forEach(m => {
+                  if (m.name) {
+                    if (!machineAgg[m.name]) {
+                      machineAgg[m.name] = { totalHours: 0 };
+                    }
+                    if (m.hours) {
+                      machineAgg[m.name].totalHours += (parseFloat(m.hours) || 0);
+                    }
+                  }
+                });
+              }
+            } catch (e) {
+              console.error("Error parsing Machine JSON", e);
+            }
+          }
         });
+
+        // Map aggregated machines to array
+        machineDetails = Object.keys(machineAgg).map(name => ({
+          Name: name,
+          TotalHours: machineAgg[name].totalHours
+        }));
 
         const staffIds = Object.keys(staffAgg);
         if (staffIds.length > 0) {
@@ -407,11 +437,11 @@ exports.getOrderMaterials = async (req, res) => {
           });
         }
       }
-    } catch (staffError) {
-      console.error("Error fetching staff for PO:", staffError);
+    } catch (planningError) {
+      console.error("Error fetching planning details for PO:", planningError);
     }
 
-    res.status(200).json({ success: true, data: result.recordset, staff: staffDetails });
+    res.status(200).json({ success: true, data: result.recordset, staff: staffDetails, machines: machineDetails });
   } catch (error) {
     console.error("Error in getOrderMaterials:", error);
     res.status(500).json({ success: false, message: error.message });
