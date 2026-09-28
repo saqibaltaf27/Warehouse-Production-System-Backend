@@ -177,7 +177,7 @@ class InventoryController {
             const todayDate = new Date().toISOString().split('T')[0];
 
             payload = {
-                CompanyDB: company === 'GMS' ? 'Z_Dummy_GMS_Live' : 'Z_Dummy_LDS_Live',
+                CompanyDB: company === 'GMS' ? 'GMS_Live' : 'LDS_Live',
                 DocDate: docDate,
                 Comments: remarks || '',
                 JournalRemark: journalRemark || remarks || (company === 'GMS' ? 'GMS Goods Receipt' : 'LDS Goods Receipt'),
@@ -330,7 +330,7 @@ class InventoryController {
             }
 
             payload = {
-                CompanyDB: company === 'GMS' ? 'Z_Dummy_GMS_Live' : 'Z_Dummy_LDS_Live',
+                CompanyDB: company === 'GMS' ? 'GMS_Live' : 'LDS_Live',
                 DocDate: docDate,
                 Comments: remarks || '',
                 Lines: []

@@ -108,7 +108,7 @@ class PurchaseOrderController {
       }
 
       const payload = {
-        CompanyDB: "Z_Dummy_LDS_Live",
+        CompanyDB: "LDS_Live",
         DocDate: docDate,
         RequiredDate: requiredDate,
         ValidUntil: validUntil || requiredDate,
