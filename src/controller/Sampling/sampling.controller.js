@@ -18,8 +18,16 @@ exports.getQCRmList = async (req, res) => {
       FROM LDS_LIVE.dbo.OPDN D
       INNER JOIN LDS_LIVE.dbo.PDN1 A ON A.DocEntry = D.DocEntry
       INNER JOIN LDS_LIVE.dbo.OITM B ON B.ItemCode = A.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.IBT1 BT ON BT.BaseType = 20 AND BT.BaseEntry = A.DocEntry AND BT.BaseLinNum = A.LineNum AND BT.ItemCode = A.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.SRI1 ST ON ST.BaseType = 20 AND ST.BaseEntry = A.DocEntry AND ST.BaseLinNum = A.LineNum AND ST.ItemCode = A.ItemCode
+      LEFT JOIN (
+          SELECT BaseType, BaseEntry, BaseLinNum, ItemCode, BatchNum, SUM(Quantity) AS Quantity
+          FROM LDS_LIVE.dbo.IBT1
+          GROUP BY BaseType, BaseEntry, BaseLinNum, ItemCode, BatchNum
+      ) BT ON BT.BaseType = 20 AND BT.BaseEntry = A.DocEntry AND BT.BaseLinNum = A.LineNum AND BT.ItemCode = A.ItemCode
+      LEFT JOIN (
+          SELECT BaseType, BaseEntry, BaseLinNum, ItemCode, SysSerial
+          FROM LDS_LIVE.dbo.SRI1
+          GROUP BY BaseType, BaseEntry, BaseLinNum, ItemCode, SysSerial
+      ) ST ON ST.BaseType = 20 AND ST.BaseEntry = A.DocEntry AND ST.BaseLinNum = A.LineNum AND ST.ItemCode = A.ItemCode
       LEFT JOIN LDS_LIVE.dbo.OSRI SR ON SR.ItemCode = ST.ItemCode AND SR.SysSerial = ST.SysSerial
       WHERE B.U_QCItem = 'Y' 
         AND B.U_cat1 = 'Raw Material' 
@@ -212,7 +220,11 @@ exports.getDocumentDetails = async (req, res) => {
         COALESCE(OIBT.SuppSerial, SR.SuppSerial) AS SupplierBatchSerial
       FROM LDS_LIVE.dbo.${lineTable} T1
       INNER JOIN LDS_LIVE.dbo.OITM B ON B.ItemCode = T1.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.IBT1 BT ON BT.BaseType = (
+      LEFT JOIN (
+          SELECT BaseType, BaseEntry, BaseLinNum, ItemCode, BatchNum, SUM(Quantity) AS Quantity
+          FROM LDS_LIVE.dbo.IBT1
+          GROUP BY BaseType, BaseEntry, BaseLinNum, ItemCode, BatchNum
+      ) BT ON BT.BaseType = (
          CASE 
            WHEN '${headerTable}' = 'OPDN' THEN 20 
            WHEN '${headerTable}' = 'OIGN' THEN 59
@@ -221,7 +233,11 @@ exports.getDocumentDetails = async (req, res) => {
          END
       ) AND BT.BaseEntry = T1.DocEntry AND BT.BaseLinNum = T1.LineNum AND BT.ItemCode = T1.ItemCode
       LEFT JOIN LDS_LIVE.dbo.OIBT OIBT ON OIBT.ItemCode = BT.ItemCode AND OIBT.BatchNum = BT.BatchNum AND OIBT.WhsCode = T1.WhsCode
-      LEFT JOIN LDS_LIVE.dbo.SRI1 ST ON ST.BaseType = (
+      LEFT JOIN (
+          SELECT BaseType, BaseEntry, BaseLinNum, ItemCode, SysSerial
+          FROM LDS_LIVE.dbo.SRI1
+          GROUP BY BaseType, BaseEntry, BaseLinNum, ItemCode, SysSerial
+      ) ST ON ST.BaseType = (
          CASE 
            WHEN '${headerTable}' = 'OPDN' THEN 20 
            WHEN '${headerTable}' = 'OIGN' THEN 59
@@ -281,12 +297,33 @@ exports.getSavedSamples = async (req, res) => {
     request.input('offset', sql.Int, offset);
     request.input('limit', sql.Int, limit);
     
-    const countQuery = `SELECT COUNT(*) as total FROM DOME.dbo.[@XD_OSMP] a JOIN DOME.dbo.[@XD_SMP1] b ON a.docentry = b.docentry`;
+    let joinClause = '';
+    let whereClause = '';
+    let extraSelect = '';
+    
+    if (req.query.status) {
+       joinClause = `JOIN DOME.dbo.[@XD_SMP1] b ON a.docentry = b.docentry`;
+       // Statuses can be comma separated, e.g. 'S,UI'
+       const statuses = req.query.status.split(',').map(s => `'${s.trim()}'`).join(',');
+       whereClause = `WHERE b.U_status IN (${statuses})`;
+       extraSelect = `, b.U_ItemName as [Item Name], b.U_Batch as [Batch]`;
+    }
+
+    if (req.query.currentMonth === 'true') {
+       const monthCondition = `a.U_SmpDate >= DATEADD(month, DATEDIFF(month, 0, GETDATE()), 0)`;
+       if (whereClause) {
+          whereClause += ` AND ${monthCondition}`;
+       } else {
+          whereClause = `WHERE ${monthCondition}`;
+       }
+    }
+    
+    const countQuery = `SELECT COUNT(DISTINCT a.Docnum) as total FROM DOME.dbo.[@XD_OSMP] a ${joinClause} ${whereClause}`;
     const countResult = await request.query(countQuery);
     const total = countResult.recordset[0].total;
 
     const dataQuery = `
-      Select 
+      Select DISTINCT
         a.Docnum as [Sampling No],
         cast(a.U_SmpDate as date) as [Sampling Date],
         case when a.U_Type = 20 then 'Goods Receipt PO'
@@ -298,36 +335,11 @@ exports.getSavedSamples = async (req, res) => {
         a.U_CardCode as [Supplier Code],
         a.U_Cardname as [Supplier Name],
         a.U_BPLId as [Branch],
-        b.U_RequestNo as [QC Request Number],
-        case when b.U_Collect = 'Y' then 'Collected Sample'
-        else 'No Sample Collected'
-        end as [Collect Sample Type],
-        b.U_ItemCode as [ItemCode],
-        b.U_ItemName as [ItemName],
-        b.U_Uom as [UOM],
-        b.U_WhsCode as [Warehouse],
-        b.U_ActualQty as [Actual Qty],
-        case when b.U_Manage = 'B' then 'Batch Managed'
-        when b.U_Manage = 'S' then 'Serial Managed' end  as [Managed By],
-        b.U_Batch as [Batch],
-        b.U_BatchQty as [Batch Qty],
-        b.U_ExpDate as [Expiry Date],
-        b.U_SmpQty as [Sample Qty],
-        case when b.U_status = 'A' then 'Accepted'
-        when b.U_status = 'UI' then 'Under Inspection'
-        when b.U_status = 'P' then 'Pending'
-        when b.U_status = 'S' then 'Sampled'
-        when b.U_status = 'R' then 'Rejected'
-        when b.U_status = 'CA' then 'Conditionally Accepted'
-        when b.U_status = 'CR' then 'Conditionally Rejected'
-        when b.U_status = 'C' then 'Cancel'
-        when b.U_status = 'C' then 'Cancel'
-        end as [Status],
-        b.U_InvWhs as [Inventory Transfer Warehouse],
-        b.U_InvNo as [Inventory Transfer No],
         a.U_DocEntry as [Document Entry]
+        ${extraSelect}
       from DOME.dbo.[@XD_OSMP] a
-      join DOME.dbo.[@XD_SMP1] b on a.docentry = b.docentry
+      ${joinClause}
+      ${whereClause}
       ORDER BY a.Docnum DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
     `;
@@ -392,17 +404,30 @@ exports.saveSample = async (req, res) => {
     await transaction.begin();
     
     try {
-      // 1. Get new DocEntry
-      const entryRequest = new sql.Request(transaction);
-      const entryRes = await entryRequest.query(`SELECT ISNULL(MAX(DocEntry), 0) + 1 AS NewDocEntry FROM DOME.dbo.[@XD_OSMP]`);
-      const newDocEntry = entryRes.recordset[0].NewDocEntry;
+      let currentDocEntry;
+      let currentDocNum;
+      let isUpdate = !!header.SamplingNo;
+
+      if (isUpdate) {
+        currentDocNum = header.SamplingNo;
+        const checkReq = new sql.Request(transaction);
+        checkReq.input('DocNum', sql.Int, currentDocNum);
+        const checkRes = await checkReq.query(`SELECT DocEntry FROM DOME.dbo.[@XD_OSMP] WHERE DocNum = @DocNum`);
+        if (checkRes.recordset.length === 0) {
+            throw new Error('Record not found for update');
+        }
+        currentDocEntry = checkRes.recordset[0].DocEntry;
+      } else {
+        const entryRequest = new sql.Request(transaction);
+        const entryRes = await entryRequest.query(`SELECT ISNULL(MAX(DocEntry), 0) + 1 AS NewDocEntry FROM DOME.dbo.[@XD_OSMP]`);
+        currentDocEntry = entryRes.recordset[0].NewDocEntry;
+        currentDocNum = currentDocEntry;
+      }
       
-      const newDocNum = newDocEntry; // Usually DocNum and DocEntry are same for these custom tables
-      
-      // 2. Insert Header
+      // 2. Insert or Update Header
       const headerRequest = new sql.Request(transaction);
-      headerRequest.input('DocEntry', sql.Int, newDocEntry);
-      headerRequest.input('DocNum', sql.Int, newDocNum);
+      headerRequest.input('DocEntry', sql.Int, currentDocEntry);
+      headerRequest.input('DocNum', sql.Int, currentDocNum);
       headerRequest.input('U_SmpDate', sql.Date, header.SamplingDate ? new Date(header.SamplingDate) : new Date());
       headerRequest.input('U_Type', sql.Int, header.DocumentType);
       headerRequest.input('U_DocNum', sql.NVarChar, header.DocumentNumber ? String(header.DocumentNumber) : null);
@@ -413,19 +438,33 @@ exports.saveSample = async (req, res) => {
       headerRequest.input('U_SmpBy', sql.NVarChar, header.UserEmpId ? String(header.UserEmpId) : null);
       headerRequest.input('U_SmpByName', sql.NVarChar, header.UserFirstName ? String(header.UserFirstName) : null);
 
-      await headerRequest.query(`
-        INSERT INTO DOME.dbo.[@XD_OSMP] 
-        (DocEntry, DocNum, U_SmpDate, U_Type, U_DocNum, U_DocEntry, U_CardCode, U_Cardname, U_BPLId, U_SmpBy, U_SmpByName)
-        VALUES 
-        (@DocEntry, @DocNum, @U_SmpDate, @U_Type, @U_DocNum, @U_DocEntry, @U_CardCode, @U_CardName, @U_BPLId, @U_SmpBy, @U_SmpByName)
-      `);
+      if (isUpdate) {
+        await headerRequest.query(`
+          UPDATE DOME.dbo.[@XD_OSMP] 
+          SET U_SmpDate = @U_SmpDate, U_Type = @U_Type, U_DocNum = @U_DocNum, U_DocEntry = @U_DocEntry, 
+              U_CardCode = @U_CardCode, U_Cardname = @U_CardName, U_BPLId = @U_BPLId, U_SmpBy = @U_SmpBy, U_SmpByName = @U_SmpByName
+          WHERE DocEntry = @DocEntry
+        `);
+        
+        // Delete old lines so we can re-insert them fresh
+        const deleteLinesReq = new sql.Request(transaction);
+        deleteLinesReq.input('DocEntry', sql.Int, currentDocEntry);
+        await deleteLinesReq.query(`DELETE FROM DOME.dbo.[@XD_SMP1] WHERE DocEntry = @DocEntry`);
+      } else {
+        await headerRequest.query(`
+          INSERT INTO DOME.dbo.[@XD_OSMP] 
+          (DocEntry, DocNum, U_SmpDate, U_Type, U_DocNum, U_DocEntry, U_CardCode, U_Cardname, U_BPLId, U_SmpBy, U_SmpByName)
+          VALUES 
+          (@DocEntry, @DocNum, @U_SmpDate, @U_Type, @U_DocNum, @U_DocEntry, @U_CardCode, @U_CardName, @U_BPLId, @U_SmpBy, @U_SmpByName)
+        `);
+      }
 
       // 3. Insert Lines
       for (let i = 0; i < lines.length; i++) {
         const item = lines[i];
         const lineRequest = new sql.Request(transaction);
 
-        lineRequest.input('DocEntry', sql.Int, newDocEntry);
+        lineRequest.input('DocEntry', sql.Int, currentDocEntry);
         lineRequest.input('LineId', sql.Int, i + 1);
         lineRequest.input('U_RequestNo', sql.NVarChar, item.QCRequestNumber ? String(item.QCRequestNumber) : null);
         lineRequest.input('U_Collect', sql.NVarChar, item.CollectSample || 'N');
@@ -455,7 +494,7 @@ exports.saveSample = async (req, res) => {
       }
 
       await transaction.commit();
-      res.json({ success: true, message: 'Sample saved successfully', docEntry: newDocEntry });
+      res.json({ success: true, message: 'Sample saved successfully', docEntry: currentDocEntry });
     } catch (dbErr) {
       await transaction.rollback();
       throw dbErr;

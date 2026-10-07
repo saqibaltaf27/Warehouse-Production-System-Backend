@@ -2,16 +2,55 @@ const { poolPromise } = require('../../database/connection');
 
 const getStaff = async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+    const offset = (page - 1) * limit;
+
     const pool = await poolPromise;
+    
+    let baseQuery = `FROM Dome.dbo.PMSStaff`;
+    let whereClause = ``;
+    
+    if (search) {
+      whereClause = ` WHERE Name LIKE @Search OR Designation LIKE @Search`;
+    }
+
+    const countQuery = `SELECT COUNT(*) as total ${baseQuery} ${whereClause}`;
+    const countRequest = pool.request();
+    if (search) {
+      countRequest.input('Search', `%${search}%`);
+    }
+    const countResult = await countRequest.query(countQuery);
+    const total = countResult.recordset[0].total;
+
     const query = `
       SELECT StaffID, Name, PhoneNumber, Address, Designation, WageSalary, CreatedDate, UpdatedDate, Status
-      FROM Dome.dbo.PMSStaff
+      ${baseQuery}
+      ${whereClause}
       ORDER BY StaffID DESC
+      OFFSET @Offset ROWS
+      FETCH NEXT @Limit ROWS ONLY
     `;
-    const result = await pool.request().query(query);
+    
+    const dataRequest = pool.request();
+    if (search) {
+      dataRequest.input('Search', `%${search}%`);
+    }
+    dataRequest.input('Offset', offset);
+    dataRequest.input('Limit', limit);
+    
+    const result = await dataRequest.query(query);
+
     res.json({
       success: true,
-      data: result.recordset
+      data: result.recordset,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
     });
   } catch (error) {
     console.error("Error fetching staff:", error);

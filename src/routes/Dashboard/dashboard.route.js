@@ -15,5 +15,6 @@ router.get('/oee', authenticateToken, dashboardController.getOEE);
 router.get('/quality', authenticateToken, dashboardController.getQuality);
 router.get('/order-summary', authenticateToken, dashboardController.getOrderSummary);
 router.get('/warehouses', authenticateToken, dashboardController.getWarehouses);
+router.get('/qc-overview', authenticateToken, dashboardController.getQcOverview);
 
 module.exports = router;

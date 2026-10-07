@@ -12,7 +12,10 @@ exports.getQualityRecords = async (req, res) => {
     request.input('offset', sql.Int, offset);
     request.input('limit', sql.Int, limit);
     
-    const countQuery = `SELECT COUNT(*) as total FROM DOME.dbo.[@XD_OQUL]`;
+    // Always exclude 'Accepted' ('A') records
+    const statusFilter = `WHERE ISNULL(H.U_QCDecision, '') <> 'A'`;
+    
+    const countQuery = `SELECT COUNT(*) as total FROM DOME.dbo.[@XD_OQUL] H ${statusFilter}`;
     const countResult = await request.query(countQuery);
     const total = countResult.recordset[0].total;
 
@@ -72,6 +75,7 @@ exports.getQualityRecords = async (req, res) => {
           H.CreateDate AS [Create Date],
           H.UpdateDate AS [Update Date]
       FROM DOME.dbo.[@XD_OQUL] H
+      ${statusFilter}
       ORDER BY H.DocEntry DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
     `;
@@ -86,6 +90,45 @@ exports.getQualityRecords = async (req, res) => {
     });
   } catch (err) {
     console.error("Error in getQualityRecords:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getWarehouses = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const request = pool.request();
+    const result = await request.query(`
+      SELECT WhsCode, WhsName 
+      FROM lds_live.dbo.OWHS 
+      ORDER BY WhsCode
+    `);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    console.error("Error fetching warehouses:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getQualityDecisions = async (req, res) => {
+  try {
+    // Return all possible QC decisions so the user can always filter by them,
+    // even if no records currently have that status in the database.
+    const allDecisions = [
+      { value: 'A', label: 'Accepted' },
+      { value: 'R', label: 'Rejected' },
+      { value: 'CA', label: 'Conditionally Accepted' },
+      { value: 'CR', label: 'Conditionally Rejected' },
+      { value: 'P', label: 'Pending' },
+      { value: 'UI', label: 'Under Inspection' }
+    ];
+    
+    res.json({
+      success: true,
+      data: allDecisions
+    });
+  } catch (err) {
+    console.error("Error in getQualityDecisions:", err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -649,3 +692,4 @@ exports.saveQCParameters = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+

@@ -810,3 +810,47 @@ exports.getWarehouses = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+exports.getQcOverview = async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
+    const targetYear = year ? parseInt(year) : new Date().getFullYear();
+
+    const pool = await poolPromise;
+    const request = pool.request();
+    request.input('targetMonth', targetMonth);
+    request.input('targetYear', targetYear);
+
+    const result = await request.query(`
+      SELECT 
+        ISNULL(G.ItmsGrpNam, 'OTHERS') AS ItemGroup,
+        I.ItemName AS ProductName,
+        SUM(O.PlannedQty) AS PlannedQty,
+        SUM(ISNULL(IGN.ProducedQty, 0)) AS CompletedQty,
+        SUM(O.PlannedQty) - SUM(ISNULL(IGN.ProducedQty, 0)) AS InProcessQty,
+        SUM(ISNULL(IGN.TotalCost, 0)) AS ResourceValue,
+        SUM(ISNULL(IGN.TotalCost, 0)) / NULLIF(SUM(ISNULL(IGN.ProducedQty, 0)), 0) AS CostPerBox
+      FROM LDS_LIVE.dbo.OWOR O
+      LEFT JOIN LDS_LIVE.dbo.OITM I ON O.ItemCode = I.ItemCode
+      LEFT JOIN LDS_LIVE.dbo.OITB G ON I.ItmsGrpCod = G.ItmsGrpCod
+      LEFT JOIN (
+        SELECT BaseEntry, SUM(Quantity) AS ProducedQty, SUM(LineTotal) AS TotalCost
+        FROM LDS_LIVE.dbo.IGN1
+        WHERE BaseType = 202
+        GROUP BY BaseEntry
+      ) IGN ON O.DocEntry = IGN.BaseEntry
+      WHERE MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+        AND G.ItmsGrpNam LIKE 'FG%'
+      GROUP BY G.ItmsGrpNam, I.ItemName
+    `);
+
+    res.status(200).json({
+      success: true,
+      data: result.recordset
+    });
+  } catch (error) {
+    console.error("Error in getQcOverview:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

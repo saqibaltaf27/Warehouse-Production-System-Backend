@@ -346,7 +346,10 @@ class ComplaintsModel {
                 END AS [PACK SIZE],
                 CAST(T1.MnfDate AS DATE) AS [MFG DATE],
                 CAST(T1.ExpDate AS DATE) AS [EXP DATE],
-                CAST(GETDATE() AS DATE) AS [DATE REPORTED]
+                CAST(GETDATE() AS DATE) AS [DATE REPORTED],
+                T0.FrgnName AS [REG],
+                ISNULL(T0.U_GenericName, '') AS [COMPOSITION],
+                '' AS [REVISION NO.]
             FROM lds_live.dbo.OITM T0
             LEFT JOIN lds_live.dbo.OBTN T1 ON T1.ItemCode = T0.ItemCode
             OUTER APPLY (

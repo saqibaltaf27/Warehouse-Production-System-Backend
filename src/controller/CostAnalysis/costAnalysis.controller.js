@@ -248,6 +248,8 @@ exports.getProductionOrders = async (req, res) => {
         o.Warehouse,
         o.PlannedQty as PlannedFGQty,
         ISNULL(f.FGQty, 0) as ActualFGQty,
+        itm.U_PackSize as PackSize,
+        (ISNULL(f.FGQty, 0) * CAST(ISNULL(NULLIF(itm.U_PackSize, ''), '1') AS FLOAT)) as TotalTestsProduced,
         (CASE WHEN o.PlannedQty > 0 THEN (ISNULL(f.FGQty, 0) / o.PlannedQty) * 100 ELSE 0 END) as YieldPercent,
         ISNULL(p.PlannedCost, 0) as PlannedCost,
         
@@ -259,6 +261,7 @@ exports.getProductionOrders = async (req, res) => {
         
         ((ISNULL(ic.ActualItemComponentCost, 0) + ISNULL(rc.ActualResourceComponentCost, 0) + ISNULL(ac.ActualAdditionalCost, 0)) - ISNULL(p.PlannedCost, 0)) as TotalVariance
       FROM LDS_LIVE.dbo.OWOR o
+      LEFT JOIN LDS_LIVE.dbo.OITM itm ON o.ItemCode = itm.ItemCode
       LEFT JOIN PlannedCosts p ON o.DocEntry = p.DocEntry
       LEFT JOIN ItemCost ic ON o.DocEntry = ic.DocEntry
       LEFT JOIN ResourceCost rc ON o.DocEntry = rc.DocEntry
@@ -270,9 +273,74 @@ exports.getProductionOrders = async (req, res) => {
     `;
     
     const result = await request.query(query);
+    const orders = result.recordset;
+
+    // Fetch Staff Cost for each order
+    try {
+      const docNums = orders.map(o => String(o.DocNum));
+      if (docNums.length > 0) {
+        const docNumsList = docNums.map(n => `'${n}'`).join(',');
+        const planningQuery = await pool.request()
+          .query(`SELECT PO, PlanDate, Persons FROM Dome.dbo.PmsProductionPlanning WHERE PO IN (${docNumsList})`);
+        
+        let staffAgg = {}; // PO -> StaffID -> { totalHours }
+        planningQuery.recordset.forEach(row => {
+          if (row.Persons) {
+            try {
+              const persons = JSON.parse(row.Persons);
+              if (Array.isArray(persons)) {
+                persons.forEach(p => {
+                  if (p.StaffID) {
+                    if (!staffAgg[row.PO]) staffAgg[row.PO] = {};
+                    if (!staffAgg[row.PO][p.StaffID]) staffAgg[row.PO][p.StaffID] = { totalHours: 0 };
+                    if (p.hours) staffAgg[row.PO][p.StaffID].totalHours += (parseFloat(p.hours) || 0);
+                  }
+                });
+              }
+            } catch (e) {}
+          }
+        });
+
+        const allStaffIds = new Set();
+        Object.values(staffAgg).forEach(poStaff => {
+          Object.keys(poStaff).forEach(id => allStaffIds.add(id));
+        });
+
+        if (allStaffIds.size > 0) {
+          const idsString = Array.from(allStaffIds).join(',');
+          const staffQuery = await pool.request()
+            .query(`SELECT StaffID, WageSalary FROM Dome.dbo.PMSStaff WHERE StaffID IN (${idsString})`);
+          
+          const staffMap = {};
+          staffQuery.recordset.forEach(s => {
+            staffMap[s.StaffID] = parseFloat(s.WageSalary) || 0;
+          });
+
+          orders.forEach(order => {
+            let totalStaffCost = 0;
+            const poStaff = staffAgg[String(order.DocNum)];
+            if (poStaff) {
+              Object.keys(poStaff).forEach(staffId => {
+                const wage = staffMap[staffId] || 0;
+                const hours = poStaff[staffId].totalHours;
+                // (WageSalary / 26 / 8) * hours
+                totalStaffCost += ((wage / 26) / 8) * hours;
+              });
+            }
+            order.CalculatedStaffCost = totalStaffCost;
+          });
+        } else {
+          orders.forEach(order => { order.CalculatedStaffCost = 0; });
+        }
+      }
+    } catch (e) {
+      console.error("Error calculating staff cost for orders:", e);
+      orders.forEach(order => { if (order.CalculatedStaffCost === undefined) order.CalculatedStaffCost = 0; });
+    }
+
     res.status(200).json({ 
       success: true, 
-      data: result.recordset,
+      data: orders,
       pagination: {
         total: totalRecords,
         page,
@@ -426,7 +494,8 @@ exports.getOrderMaterials = async (req, res) => {
             const daysWorked = agg ? agg.dates.size : 0;
             let cost = 0;
             if (totalHours > 0) {
-              cost = ((parseFloat(s.WageSalary) || 0) / 8) * totalHours;
+              // Convert monthly salary to per day (divide by 26) then per hour (divide by 8)
+              cost = (((parseFloat(s.WageSalary) || 0) / 26) / 8) * totalHours;
             }
             return {
               ...s,
