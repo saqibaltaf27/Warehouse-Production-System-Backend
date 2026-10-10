@@ -827,8 +827,18 @@ exports.getQcOverview = async (req, res) => {
         ISNULL(G.ItmsGrpNam, 'OTHERS') AS ItemGroup,
         I.ItemName AS ProductName,
         SUM(O.PlannedQty) AS PlannedQty,
-        SUM(ISNULL(IGN.ProducedQty, 0)) AS CompletedQty,
-        SUM(O.PlannedQty) - SUM(ISNULL(IGN.ProducedQty, 0)) AS InProcessQty,
+        CASE 
+          WHEN SUM(ISNULL(IGN.ProducedQty, 0)) > SUM(O.PlannedQty) THEN SUM(O.PlannedQty)
+          ELSE SUM(ISNULL(IGN.ProducedQty, 0))
+        END AS CompletedQty,
+        CASE 
+          WHEN SUM(ISNULL(IGN.ProducedQty, 0)) > SUM(O.PlannedQty) THEN SUM(ISNULL(IGN.ProducedQty, 0)) - SUM(O.PlannedQty)
+          ELSE 0
+        END AS OverProducedQty,
+        CASE 
+          WHEN SUM(O.PlannedQty) - SUM(ISNULL(IGN.ProducedQty, 0)) < 0 THEN 0 
+          ELSE SUM(O.PlannedQty) - SUM(ISNULL(IGN.ProducedQty, 0)) 
+        END AS InProcessQty,
         SUM(ISNULL(IGN.TotalCost, 0)) AS ResourceValue,
         SUM(ISNULL(IGN.TotalCost, 0)) / NULLIF(SUM(ISNULL(IGN.ProducedQty, 0)), 0) AS CostPerBox
       FROM LDS_LIVE.dbo.OWOR O
@@ -851,6 +861,100 @@ exports.getQcOverview = async (req, res) => {
     });
   } catch (error) {
     console.error("Error in getQcOverview:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getTopProductsCostTrend = async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
+    const targetYear = year ? parseInt(year) : new Date().getFullYear();
+
+    const pool = await poolPromise;
+    const request = pool.request();
+    request.input('targetMonth', targetMonth);
+    request.input('targetYear', targetYear);
+
+    // 1. Get top 2 products by CompletedQty
+    const topProductsQuery = `
+      SELECT TOP 2
+        I.ItemCode,
+        I.ItemName
+      FROM LDS_LIVE.dbo.OWOR O
+      LEFT JOIN LDS_LIVE.dbo.OITM I ON O.ItemCode = I.ItemCode
+      LEFT JOIN LDS_LIVE.dbo.OITB G ON I.ItmsGrpCod = G.ItmsGrpCod
+      LEFT JOIN (
+        SELECT BaseEntry, SUM(Quantity) AS ProducedQty
+        FROM LDS_LIVE.dbo.IGN1
+        WHERE BaseType = 202
+        GROUP BY BaseEntry
+      ) IGN ON O.DocEntry = IGN.BaseEntry
+      WHERE MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+        AND G.ItmsGrpNam LIKE 'FG%'
+      GROUP BY I.ItemCode, I.ItemName
+      ORDER BY SUM(ISNULL(IGN.ProducedQty, 0)) DESC
+    `;
+    const topProductsResult = await request.query(topProductsQuery);
+    const topProducts = topProductsResult.recordset;
+
+    if (topProducts.length === 0) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    // 2. Fetch recent PO trends for these products
+    let finalData = [];
+    for (let product of topProducts) {
+      const trendReq = pool.request();
+      trendReq.input('targetMonth', targetMonth);
+      trendReq.input('targetYear', targetYear);
+      trendReq.input('itemCode', product.ItemCode);
+      const trendQuery = `
+        SELECT 
+          CAST(O.DocNum AS VARCHAR(20)) AS po,
+          CAST(SUM(ISNULL(IGN.TotalCost, 0)) / NULLIF(SUM(ISNULL(IGN.ProducedQty, 0)), 0) AS FLOAT) AS cost,
+          CAST(SUM(ISNULL(IGN.ProducedQty, 0)) AS FLOAT) AS completedQty
+        FROM LDS_LIVE.dbo.OWOR O
+        LEFT JOIN (
+          SELECT BaseEntry, SUM(Quantity) AS ProducedQty, SUM(LineTotal) AS TotalCost
+          FROM LDS_LIVE.dbo.IGN1
+          WHERE BaseType = 202
+          GROUP BY BaseEntry
+        ) IGN ON O.DocEntry = IGN.BaseEntry
+        WHERE O.ItemCode = @itemCode
+          AND MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+          AND ISNULL(IGN.ProducedQty, 0) > 0
+        GROUP BY O.DocNum
+        ORDER BY O.DocNum ASC
+      `;
+      const trendResult = await trendReq.query(trendQuery);
+      finalData.push({
+        itemName: product.ItemName,
+        trends: trendResult.recordset
+      });
+    }
+
+    res.status(200).json({ success: true, data: finalData });
+  } catch (error) {
+    console.error("Error in getTopProductsCostTrend:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.testPackSize = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT TOP 20 
+        ItemCode, 
+        ItemName, 
+        SalPackUn, 
+        NumInSale
+      FROM LDS_LIVE.dbo.OITM 
+      WHERE ItemName LIKE '%50%' OR ItemName LIKE '%96%' OR ItemName LIKE '%Rapid%'
+    `);
+    res.status(200).json({ success: true, data: result.recordset });
+  } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
