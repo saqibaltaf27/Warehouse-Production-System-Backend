@@ -273,11 +273,38 @@ const getProductionPlans = async (req, res) => {
       ORDER BY p.CreatedAt DESC
     `;
     const result = await pool.request().query(query);
-    
-    // Parse Persons JSON for the frontend
-    const plans = result.recordset.map(plan => ({
+
+    const parsedPersons = result.recordset.map(plan => {
+      if (!plan.Persons) return [];
+      try {
+        const parsed = JSON.parse(plan.Persons);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    });
+
+    const staffIds = [...new Set(
+      parsedPersons.flatMap(items => items.map(item => parseInt(item.StaffID, 10))).filter(id => Number.isInteger(id))
+    )];
+
+    const staffNameById = {};
+    if (staffIds.length > 0) {
+      const staffResult = await pool.request().query(
+        `SELECT StaffID, Name FROM Dome.dbo.PMSStaff WHERE StaffID IN (${staffIds.join(',')})`
+      );
+      staffResult.recordset.forEach(staff => {
+        staffNameById[staff.StaffID] = staff.Name;
+      });
+    }
+
+    // Persons stores StaffID + J.D. Resolve the employee name for the labour drill-down.
+    const plans = result.recordset.map((plan, index) => ({
       ...plan,
-      jdItems: plan.Persons ? JSON.parse(plan.Persons) : []
+      jdItems: parsedPersons[index].map(item => ({
+        ...item,
+        name: item.name || staffNameById[parseInt(item.StaffID, 10)] || ''
+      }))
     }));
 
     res.json({
@@ -575,6 +602,129 @@ const createMachineEfficiency = async (req, res) => {
   }
 };
 
+const getPlannedReleasedOrders = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const search = String(req.query.search || "").trim();
+    const request = pool.request();
+    let searchClause = "";
+    if (search) {
+      request.input("Search", `%${search}%`);
+      searchClause = `
+        AND (
+          T0.ProdName LIKE @Search
+          OR T0.ItemCode LIKE @Search
+          OR CAST(T0.DocNum AS NVARCHAR(20)) LIKE @Search
+        )
+      `;
+    }
+    const query = `
+      SELECT
+        T0.DocNum AS ProductionOrderNo,
+        T0.ItemCode AS FGItemCode,
+        T0.ProdName AS ProductName,
+        T0.PostDate AS PostingDate,
+        T0.DueDate AS DueDate,
+        CASE T0.Status
+          WHEN 'P' THEN 'Planned'
+          WHEN 'R' THEN 'Released'
+          WHEN 'L' THEN 'Closed'
+          WHEN 'C' THEN 'Cancelled'
+          ELSE T0.Status
+        END AS ProductionOrderStatus,
+        T0.PlannedQty AS PlannedQuantity,
+        T0.CmpltQty AS CompletedQuantity,
+        T0.RjctQty AS RejectedQuantity,
+        T0.PlannedQty - T0.CmpltQty - T0.RjctQty AS PendingQuantity,
+        T0.Warehouse AS Warehouse,
+        W.WhsName AS WarehouseName
+      FROM LDS_LIVE.dbo.OWOR T0
+      LEFT JOIN LDS_LIVE.dbo.OWHS W ON T0.Warehouse = W.WhsCode
+      WHERE T0.Status IN ('P', 'R')
+      ${searchClause}
+      ORDER BY T0.DueDate ASC, T0.DocNum DESC
+    `;
+    const result = await request.query(query);
+    res.json({ success: true, data: result.recordset });
+  } catch (error) {
+    console.error("Error in getPlannedReleasedOrders:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch planned and released orders" });
+  }
+};
+
+const getTodayWorkingPlans = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const date = req.query.date || new Date().toISOString().split("T")[0];
+    const result = await pool.request()
+      .input("PlanDate", date)
+      .query(`
+        SELECT P.Id, P.PlanDate, P.Line, P.PO, P.Shift, P.Supervisor, P.Persons,
+               O.ItemCode AS FGItemCode, O.ProdName AS ProductName
+        FROM Dome.dbo.PmsProductionPlanning P
+        LEFT JOIN LDS_LIVE.dbo.OWOR O
+          ON TRY_CAST(P.PO AS INT) = O.DocNum
+        WHERE CAST(P.PlanDate AS DATE) = @PlanDate
+        ORDER BY P.Line, P.PO
+      `);
+
+    const staffIds = new Set();
+    const parsed = result.recordset.map((plan) => {
+      let persons = [];
+      try {
+        const raw = plan.Persons ? JSON.parse(plan.Persons) : [];
+        if (Array.isArray(raw)) {
+          persons = raw.map((person) => {
+            const staffId = parseInt(person.StaffID, 10);
+            if (Number.isInteger(staffId)) staffIds.add(staffId);
+            return {
+              StaffID: Number.isInteger(staffId) ? staffId : null,
+              jd: person.jd || "",
+              hours: person.hours || "",
+            };
+          }).filter((person) => person.StaffID);
+        }
+      } catch (error) {
+        persons = [];
+      }
+      return { ...plan, persons };
+    });
+
+    const staffNameById = {};
+    const ids = [...staffIds];
+    if (ids.length > 0) {
+      const staffResult = await pool.request().query(`
+        SELECT StaffID, Name FROM Dome.dbo.PMSStaff WHERE StaffID IN (${ids.join(",")})
+      `);
+      staffResult.recordset.forEach((staff) => {
+        staffNameById[staff.StaffID] = staff.Name;
+      });
+    }
+
+    const data = parsed.map((plan) => ({
+      Id: plan.Id,
+      PlanDate: plan.PlanDate,
+      Line: plan.Line,
+      PO: plan.PO,
+      FGItemCode: plan.FGItemCode || "",
+      ProductName: plan.ProductName || "",
+      Shift: plan.Shift,
+      Supervisor: plan.Supervisor,
+      staff: plan.persons.map((person) => ({
+        StaffID: person.StaffID,
+        Name: staffNameById[person.StaffID] || "",
+        jd: person.jd,
+        hours: person.hours,
+      })),
+    }));
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error("Error in getTodayWorkingPlans:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch today's working plans" });
+  }
+};
+
 module.exports = {
   getExecutiveKPIs,
   getMaterialShortages,
@@ -587,6 +737,8 @@ module.exports = {
   createManEfficiency,
   getManEfficiency,
   createMachineEfficiency,
-  getMachineEfficiency
+  getMachineEfficiency,
+  getPlannedReleasedOrders,
+  getTodayWorkingPlans
 };
 

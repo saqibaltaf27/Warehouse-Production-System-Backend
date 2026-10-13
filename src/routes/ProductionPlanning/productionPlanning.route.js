@@ -12,7 +12,9 @@ const {
     createManEfficiency,
     getManEfficiency,
     createMachineEfficiency,
-    getMachineEfficiency
+    getMachineEfficiency,
+    getPlannedReleasedOrders,
+    getTodayWorkingPlans
 } = require('../../controller/ProductionPlanning/productionPlanning.controller');
 const {
     getProductHistory,
@@ -28,6 +30,8 @@ router.get('/shortages', getMaterialShortages);
 router.get('/batch-expiry', getBatchExpiry);
 router.get('/open-orders', getOpenProductionOrders);
 router.get('/machines', getMachines);
+router.get('/planned-released-orders', getPlannedReleasedOrders);
+router.get('/today-working-plans', getTodayWorkingPlans);
 
 // Production Plan Routes
 router.get('/plans', getProductionPlans);
