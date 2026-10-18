@@ -10,6 +10,10 @@ class PurchaseOrderController {
       const page = parseInt(req.query.page, 10) || 1;
       const rawLimit = req.query.limit;
       const search = req.query.search || "";
+      const status = req.query.status || "";
+      const branch = req.query.branch || "";
+      const fromDate = req.query.fromDate || "";
+      const toDate = req.query.toDate || "";
       const limit =
         rawLimit === "0" || rawLimit === "all" || rawLimit === "ALL"
           ? 0
@@ -20,6 +24,10 @@ class PurchaseOrderController {
         limit,
         offset,
         search,
+        status,
+        branch,
+        fromDate,
+        toDate
       );
 
       const responseData = {

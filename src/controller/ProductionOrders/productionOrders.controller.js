@@ -344,16 +344,86 @@ exports.getPaginatedProductionOrders = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || '';
+    const { status, project, product, warehouse, fromDate, toDate, sortBy, sortOrder } = req.query;
     const offset = (page - 1) * limit;
 
     const pool = await poolPromise;
     const request = pool.request();
+    const countRequest = pool.request();
     
-    let whereClause = '';
-    if (search.trim()) {
-      whereClause = `WHERE CAST(DocNum AS VARCHAR) LIKE @Search OR ItemCode LIKE @Search OR ProdName LIKE @Search OR Project LIKE @Search`;
-      request.input('Search', sql.VarChar, `%${search}%`);
+    const conditions = [];
+
+    if (search && search.trim()) {
+      conditions.push(`(CAST(DocNum AS VARCHAR) LIKE @Search OR ItemCode LIKE @Search OR ProdName LIKE @Search OR Project LIKE @Search)`);
+      request.input('Search', sql.VarChar, `%${search.trim()}%`);
+      countRequest.input('Search', sql.VarChar, `%${search.trim()}%`);
     }
+
+    if (status && status.trim()) {
+      const statusMap = {
+        'Planned': 'P',
+        'Released': 'R',
+        'Closed': 'L',
+        'Cancelled': 'C',
+        'P': 'P',
+        'R': 'R',
+        'L': 'L',
+        'C': 'C'
+      };
+      const dbStatus = statusMap[status] || status;
+      conditions.push(`Status = @Status`);
+      request.input('Status', sql.VarChar, dbStatus);
+      countRequest.input('Status', sql.VarChar, dbStatus);
+    }
+
+    if (project && project.trim()) {
+      conditions.push(`Project = @Project`);
+      request.input('Project', sql.VarChar, project.trim());
+      countRequest.input('Project', sql.VarChar, project.trim());
+    }
+
+    if (product && product.trim()) {
+      conditions.push(`ItemCode = @Product`);
+      request.input('Product', sql.VarChar, product.trim());
+      countRequest.input('Product', sql.VarChar, product.trim());
+    }
+
+    if (warehouse && warehouse.trim()) {
+      conditions.push(`Warehouse = @Warehouse`);
+      request.input('Warehouse', sql.VarChar, warehouse.trim());
+      countRequest.input('Warehouse', sql.VarChar, warehouse.trim());
+    }
+
+    if (fromDate && fromDate.trim()) {
+      conditions.push(`DueDate >= @FromDate`);
+      request.input('FromDate', sql.VarChar, fromDate.trim());
+      countRequest.input('FromDate', sql.VarChar, fromDate.trim());
+    }
+
+    if (toDate && toDate.trim()) {
+      conditions.push(`DueDate <= @ToDate`);
+      request.input('ToDate', sql.VarChar, toDate.trim());
+      countRequest.input('ToDate', sql.VarChar, toDate.trim());
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const sortColumnMap = {
+      DocNum: 'DocNum',
+      ProductNo: 'ItemCode',
+      ItemCode: 'ItemCode',
+      ProductDescription: 'ProdName',
+      ProdName: 'ProdName',
+      PlannedQty: 'PlannedQty',
+      DueDate: 'DueDate',
+      OrderDate: 'PostDate',
+      Project: 'Project',
+      Status: 'Status',
+      DocEntry: 'DocEntry'
+    };
+
+    const orderColumn = sortColumnMap[sortBy] || 'DocEntry';
+    const orderDirection = sortOrder === 'asc' || sortOrder === 'ascending' ? 'ASC' : 'DESC';
     
     const query = `
       SELECT 
@@ -373,7 +443,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
         END AS Status
       FROM LDS_LIVE.dbo.OWOR 
       ${whereClause}
-      ORDER BY DocEntry DESC 
+      ORDER BY ${orderColumn} ${orderDirection} 
       OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
     `;
     
@@ -381,11 +451,6 @@ exports.getPaginatedProductionOrders = async (req, res) => {
 
     request.input('Offset', sql.Int, offset);
     request.input('Limit', sql.Int, limit);
-
-    const countRequest = pool.request();
-    if (search.trim()) {
-      countRequest.input('Search', sql.VarChar, `%${search}%`);
-    }
     
     const [dataResult, countResult] = await Promise.all([
       request.query(query),

@@ -1,21 +1,53 @@
 const { sql, poolPromise } = require("../../database/connection");
 
 class PurchaseOrderModel {
-    static async getPurchaseRequests(limit, offset, search = '') {
+    static async getPurchaseRequests(limit, offset, search = '', status = '', branch = '', fromDate = '', toDate = '') {
         try {
             const pool = await poolPromise;
             
-            let whereClause = '';
+            const conditions = [];
+            const req = pool.request();
+            const countReq = pool.request();
+
             if (search) {
-                whereClause = ` WHERE 
-                    CAST(T0.DocEntry AS VARCHAR) LIKE '%' + @search + '%' OR 
-                    CAST(T0.DocNum AS VARCHAR) LIKE '%' + @search + '%' OR 
-                    T0.ReqName LIKE '%' + @search + '%' `;
+                conditions.push(`(CAST(T0.DocEntry AS VARCHAR) LIKE '%' + @search + '%' OR CAST(T0.DocNum AS VARCHAR) LIKE '%' + @search + '%' OR T0.ReqName LIKE '%' + @search + '%' OR T0.Comments LIKE '%' + @search + '%')`);
+                req.input('search', sql.VarChar, search);
+                countReq.input('search', sql.VarChar, search);
             }
 
-            const countQuery = `SELECT COUNT(*) as total FROM LDS_LIVE.dbo.OPRQ T0 ${whereClause}`;
-            const countReq = pool.request();
-            if (search) countReq.input('search', sql.VarChar, search);
+            if (status) {
+                if (status === 'Open' || status === 'O') {
+                    conditions.push(`(T0.DocStatus = 'O' OR T0.DocStatus = 'Open')`);
+                } else if (status === 'Closed' || status === 'C') {
+                    conditions.push(`(T0.DocStatus = 'C' OR T0.DocStatus = 'Closed')`);
+                } else {
+                    conditions.push(`T0.DocStatus = @status`);
+                    req.input('status', sql.VarChar, status);
+                    countReq.input('status', sql.VarChar, status);
+                }
+            }
+
+            if (branch) {
+                conditions.push(`(T1.Remarks = @branch OR CAST(T0.Branch AS VARCHAR) = @branch)`);
+                req.input('branch', sql.VarChar, branch);
+                countReq.input('branch', sql.VarChar, branch);
+            }
+
+            if (fromDate) {
+                conditions.push(`T0.DocDate >= @fromDate`);
+                req.input('fromDate', sql.VarChar, fromDate);
+                countReq.input('fromDate', sql.VarChar, fromDate);
+            }
+
+            if (toDate) {
+                conditions.push(`T0.DocDate <= @toDate`);
+                req.input('toDate', sql.VarChar, toDate);
+                countReq.input('toDate', sql.VarChar, toDate);
+            }
+
+            const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')} ` : '';
+
+            const countQuery = `SELECT COUNT(*) as total FROM LDS_LIVE.dbo.OPRQ T0 LEFT JOIN LDS_LIVE.dbo.OUBR T1 ON T0.Branch = T1.Code ${whereClause}`;
             const countResult = await countReq.query(countQuery);
             const total = countResult.recordset[0].total;
 
@@ -38,11 +70,6 @@ class PurchaseOrderModel {
 
             if (limit > 0) {
                 query += ` OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY`;
-            }
-
-            const req = pool.request();
-            if (search) req.input('search', sql.VarChar, search);
-            if (limit > 0) {
                 req.input('offset', sql.Int, offset);
                 req.input('limit', sql.Int, limit);
             }
