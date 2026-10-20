@@ -4,9 +4,9 @@ const sql = require('mssql');
 exports.getProductionOrderDetails = async (req, res) => {
   try {
     const { itemCode } = req.params;
-    
+
     if (!itemCode) {
-        return res.status(400).json({ success: false, message: 'ItemCode is required' });
+      return res.status(400).json({ success: false, message: 'ItemCode is required' });
     }
 
     const pool = await poolPromise;
@@ -219,7 +219,7 @@ exports.getProductionProducts = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT Code, Name FROM LDS_LIVE.dbo.OITT WHERE TreeType='P'`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -235,7 +235,7 @@ exports.getWarehouses = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT WhsCode, WhsName FROM LDS_LIVE.dbo.OWHS`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -251,7 +251,7 @@ exports.getBranches = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT BPLId, BPLName FROM LDS_LIVE.dbo.OBPL`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -267,7 +267,7 @@ exports.getProjects = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT PrjCode, PrjName, Active FROM LDS_LIVE.dbo.OPRJ WHERE Active = 'Y'`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -281,7 +281,7 @@ exports.getProjects = async (req, res) => {
 exports.createProductionOrder = async (req, res) => {
   try {
     const payload = req.body;
-    
+
     const response = await fetch('http://115.186.130.76:7206/api/ProductionOrder/Create', {
       method: 'POST',
       headers: {
@@ -312,7 +312,7 @@ exports.getOpenSalesOrders = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT DocNum, DocDate, CardName, Comments FROM LDS_LIVE.dbo.ORDR WHERE DocStatus = 'O'`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -328,7 +328,7 @@ exports.getOpenProductionOrders = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT DocNum, Project, DueDate, ProdName, PlannedQty FROM LDS_LIVE.dbo.OWOR WHERE Status NOT IN ('C','L')`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -350,7 +350,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
     const pool = await poolPromise;
     const request = pool.request();
     const countRequest = pool.request();
-    
+
     const conditions = [];
 
     if (search && search.trim()) {
@@ -424,7 +424,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
 
     const orderColumn = sortColumnMap[sortBy] || 'DocEntry';
     const orderDirection = sortOrder === 'asc' || sortOrder === 'ascending' ? 'ASC' : 'DESC';
-    
+
     const query = `
       SELECT 
         DocNum, 
@@ -446,12 +446,12 @@ exports.getPaginatedProductionOrders = async (req, res) => {
       ORDER BY ${orderColumn} ${orderDirection} 
       OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
     `;
-    
+
     const countQuery = `SELECT COUNT(*) AS total FROM LDS_LIVE.dbo.OWOR ${whereClause}`;
 
     request.input('Offset', sql.Int, offset);
     request.input('Limit', sql.Int, limit);
-    
+
     const [dataResult, countResult] = await Promise.all([
       request.query(query),
       countRequest.query(countQuery)
@@ -471,9 +471,9 @@ exports.getPaginatedProductionOrders = async (req, res) => {
 exports.getProductionOrderDetailsByDocNum = async (req, res) => {
   try {
     const { docNum } = req.params;
-    
+
     if (!docNum) {
-        return res.status(400).json({ success: false, message: 'DocNum is required' });
+      return res.status(400).json({ success: false, message: 'DocNum is required' });
     }
 
     const pool = await poolPromise;
@@ -676,7 +676,7 @@ exports.getCustomers = async (req, res) => {
     const pool = await poolPromise;
     const query = `SELECT CardCode, CardName FROM LDS_LIVE.dbo.OCRD WHERE CardType='C'`;
     const result = await pool.request().query(query);
-    
+
     res.status(200).json({
       success: true,
       data: result.recordset
@@ -690,9 +690,9 @@ exports.getCustomers = async (req, res) => {
 exports.getBOMDetails = async (req, res) => {
   try {
     const { itemCode } = req.params;
-    
+
     if (!itemCode) {
-        return res.status(400).json({ success: false, message: 'ItemCode is required' });
+      return res.status(400).json({ success: false, message: 'ItemCode is required' });
     }
 
     const pool = await poolPromise;
@@ -819,3 +819,137 @@ exports.getBOMDetails = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+exports.getMaterialCapacityReport = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const query = `
+      
+WITH BomItems AS (
+    SELECT
+        T.Code AS ProductCode,
+        T.Name AS ProductName,
+        I.U_Cat1 AS [Category],
+        I.U_Type AS [Product Type],
+        L.Code AS ComponentCode,
+        L.ItemName AS ComponentName,
+        L.Quantity AS BaseQty,
+        I.InvntryUom AS UoMName,
+        W.WhsCode AS Warehouse,
+
+        W.OnHand AS AvailableStock,
+
+        CASE
+            WHEN L.Quantity > 0 THEN
+                FLOOR(
+                    CASE
+                        WHEN ISNULL(W.OnHand, 0)
+                           - ISNULL(W.IsCommited, 0) < 0
+                        THEN 0
+                        ELSE ISNULL(W.OnHand, 0)
+                           - ISNULL(W.IsCommited, 0)
+                    END / L.Quantity
+                )
+            ELSE 0
+        END AS ProducibleUnits,
+
+        ROW_NUMBER() OVER (
+            PARTITION BY T.Code
+            ORDER BY
+                CASE
+                    WHEN L.Quantity > 0 THEN
+                        FLOOR(
+                            CASE
+                                WHEN ISNULL(W.OnHand, 0)
+                                   - ISNULL(W.IsCommited, 0) < 0
+                                THEN 0
+                                ELSE ISNULL(W.OnHand, 0)
+                                   - ISNULL(W.IsCommited, 0)
+                            END / L.Quantity
+                        )
+                    ELSE 999999999
+                END ASC,
+                L.VisOrder ASC,
+                W.WhsCode ASC
+        ) AS rn
+
+    FROM LDS_LIVE.dbo.OITT T
+    INNER JOIN LDS_LIVE.dbo.ITT1 L
+        ON T.Code = L.Father
+    INNER JOIN LDS_LIVE.dbo.OITM I
+        ON T.Code = I.ItemCode
+    INNER JOIN LDS_LIVE.dbo.OITW W
+        ON L.Code = W.ItemCode
+       AND W.WhsCode IN ('11','14', '15')
+
+    WHERE
+        T.TreeType = 'P'
+        AND L.Type = 4
+),
+
+ProductSummary AS (
+    SELECT
+        ProductCode,
+        COUNT(*) AS TotalComponents,
+        MIN(ProducibleUnits) AS CapacityUnits
+    FROM BomItems
+    GROUP BY ProductCode
+)
+
+SELECT
+    b.ProductCode,
+    b.ProductName,
+    b.Category,
+    b.[Product Type],
+    s.TotalComponents,
+    s.CapacityUnits,
+    b.ComponentCode,
+    b.ComponentName,
+    b.BaseQty AS ComponentQty,
+    b.AvailableStock,
+    b.UoMName AS ComponentUoM,
+    --b.Warehouse,
+    CASE
+        WHEN b.ProducibleUnits = s.CapacityUnits
+            THEN 'Limiting'
+        ELSE 'Available'
+    END AS ComponentStatus
+
+FROM BomItems b
+INNER JOIN ProductSummary s
+    ON b.ProductCode = s.ProductCode
+
+ORDER BY
+    CASE WHEN s.CapacityUnits > 0 THEN 0 ELSE 1 END,
+    s.CapacityUnits DESC,
+    b.ProductCode ASC,
+    b.ComponentCode ASC,
+    b.Warehouse ASC;
+    `;
+
+    const result = await pool.request().query(query);
+    const records = result.recordset || [];
+
+    const totalProducts = records.length;
+    const finishedGoodsCount = records.filter(r => r.ProductType === 'Finished Goods').length;
+    const semiFinishedCount = records.filter(r => r.ProductType === 'Semi Finished').length;
+    const withCapacityCount = records.filter(r => r.CapacityUnits > 0).length;
+    const zeroCapacityCount = records.filter(r => r.CapacityUnits === 0).length;
+
+    res.status(200).json({
+      success: true,
+      data: records,
+      kpis: {
+        totalProducts,
+        finishedGoodsCount,
+        semiFinishedCount,
+        withCapacityCount,
+        zeroCapacityCount
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching Material-based Production Capacity report:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+

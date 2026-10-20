@@ -12,6 +12,7 @@ router.get('/open', authenticateToken, productionOrdersController.getOpenProduct
 router.get('/paginated', authenticateToken, productionOrdersController.getPaginatedProductionOrders);
 router.get('/customers', authenticateToken, productionOrdersController.getCustomers);
 router.get('/details-by-docnum/:docNum', authenticateToken, productionOrdersController.getProductionOrderDetailsByDocNum);
+router.get('/material-capacity', authenticateToken, productionOrdersController.getMaterialCapacityReport);
 router.get('/bom/:itemCode', authenticateToken, productionOrdersController.getBOMDetails);
 router.get('/:itemCode', authenticateToken, productionOrdersController.getProductionOrderDetails);
 

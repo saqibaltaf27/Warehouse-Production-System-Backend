@@ -106,6 +106,9 @@ const getMaterialShortages = async (req, res) => {
     const offset = (page - 1) * pageSize;
     
     const search = req.query.search || '';
+    const warehouse = req.query.warehouse || '';
+    const status = req.query.status || '';
+    const minShortage = parseFloat(req.query.minShortage) || 0;
     
     // Dataset 2: Material Shortages for Open Orders
     // We use standard SAP B1 logic: IsCommited vs OnHand for true shortage
@@ -127,6 +130,7 @@ const getMaterialShortages = async (req, res) => {
           FROM LDS_LIVE.dbo.OITW w (NOLOCK)
           INNER JOIN LDS_LIVE.dbo.OITM m (NOLOCK) ON w.ItemCode = m.ItemCode
           INNER JOIN ProdComponents pc ON m.ItemCode = pc.ItemCode
+          ${warehouse ? `WHERE w.WhsCode = '${warehouse}'` : ''}
           GROUP BY m.ItemCode, m.ItemName
           HAVING SUM(w.OnHand) < SUM(w.IsCommited)
       )
@@ -136,6 +140,14 @@ const getMaterialShortages = async (req, res) => {
     
     if (search) {
       query += ` AND (ComponentCode LIKE '%${search}%' OR ComponentName LIKE '%${search}%')`;
+    }
+    if (status === 'zero_stock') {
+      query += ` AND TotalAvailable <= 0`;
+    } else if (status === 'partial_stock') {
+      query += ` AND TotalAvailable > 0`;
+    }
+    if (minShortage > 0) {
+      query += ` AND ShortageQty >= ${minShortage}`;
     }
     
     // Get total count
@@ -173,6 +185,8 @@ const getBatchExpiry = async (req, res) => {
     const search = req.query.search || '';
     const warehouse = req.query.warehouse || '';
     const bucket = req.query.bucket || '';
+    const fromDate = req.query.fromDate || '';
+    const toDate = req.query.toDate || '';
     
     let whereClause = "q.Quantity > 0 AND b.ExpDate IS NOT NULL";
     if (search) {
@@ -189,6 +203,12 @@ const getBatchExpiry = async (req, res) => {
       whereClause += ` AND b.ExpDate > DATEADD(day, 30, CAST(GETDATE() AS DATE)) AND b.ExpDate <= DATEADD(day, 90, CAST(GETDATE() AS DATE))`;
     } else if (bucket === '90+ Days') {
       whereClause += ` AND b.ExpDate > DATEADD(day, 90, CAST(GETDATE() AS DATE))`;
+    }
+    if (fromDate) {
+      whereClause += ` AND b.ExpDate >= '${fromDate}'`;
+    }
+    if (toDate) {
+      whereClause += ` AND b.ExpDate <= '${toDate}'`;
     }
 
     // Total Count
