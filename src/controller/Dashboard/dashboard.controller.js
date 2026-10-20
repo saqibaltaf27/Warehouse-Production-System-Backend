@@ -1,4 +1,5 @@
 const { sql, poolPromise } = require('../../database/connection');
+const { formatDate } = require('../../hooks/dateformat');
 
 // Helper for filtering
 function buildWhereClause(query, request, tableAlias = 'p') {
@@ -937,6 +938,449 @@ exports.getTopProductsCostTrend = async (req, res) => {
     res.status(200).json({ success: true, data: finalData });
   } catch (error) {
     console.error("Error in getTopProductsCostTrend:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMonthlyProductionAchievement = async (req, res) => {
+  try {
+    const month = Number(req.query.month);
+    const year = Number(req.query.year);
+    if (!month || !year || month < 1 || month > 12) {
+      return res.status(400).json({ success: false, message: "month and year are required" });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input("month", sql.Int, month)
+      .input("year", sql.Int, year)
+      .query(`
+        DECLARE @start DATE = DATEFROMPARTS(@year, @month, 1);
+        DECLARE @end DATE = DATEADD(MONTH, 1, @start);
+
+        SELECT
+          T0.DocNum AS ProductionOrderNo,
+          T0.ItemCode,
+          T0.ProdName AS ProductName,
+          T0.DueDate,
+          T0.CloseDate,
+          CASE T0.Status
+            WHEN 'P' THEN 'Planned'
+            WHEN 'R' THEN 'Released'
+            WHEN 'L' THEN 'Closed'
+            WHEN 'C' THEN 'Cancelled'
+            ELSE ISNULL(T0.Status, 'Unknown')
+          END AS StatusName,
+          T0.PlannedQty,
+          T0.CmpltQty AS CompletedQty,
+          CASE
+            WHEN T0.Status = 'L' AND T0.CloseDate >= @start AND T0.CloseDate < @end THEN 1
+            ELSE 0
+          END AS ClosedInMonth
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.DueDate >= @start AND T0.DueDate < @end
+        ORDER BY T0.DueDate, T0.DocNum
+      `);
+
+    const orders = (result.recordset || []).map((row) => ({
+      ...row,
+      DueDate: formatDate(row.DueDate),
+      CloseDate: formatDate(row.CloseDate),
+    }));
+    const dueInMonth = orders.length;
+    const closedInMonth = orders.filter((row) => Number(row.ClosedInMonth) === 1).length;
+    const achievement = dueInMonth > 0 ? Number(((closedInMonth / dueInMonth) * 100).toFixed(1)) : 0;
+
+    res.status(200).json({
+      success: true,
+      data: { dueInMonth, closedInMonth, achievement, orders },
+    });
+  } catch (error) {
+    console.error("Error in getMonthlyProductionAchievement:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMonthlySampleStatus = async (req, res) => {
+  try {
+    const month = Number(req.query.month);
+    const year = Number(req.query.year);
+    if (!month || !year || month < 1 || month > 12) {
+      return res.status(400).json({ success: false, message: "month and year are required" });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input("month", sql.Int, month)
+      .input("year", sql.Int, year)
+      .query(`
+        DECLARE @start DATE = DATEFROMPARTS(@year, @month, 1);
+        DECLARE @end DATE = DATEADD(MONTH, 1, @start);
+
+        SELECT b.U_status AS StatusCode, COUNT(*) AS LineCount
+        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
+        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
+        WHERE a.U_SmpDate >= @start AND a.U_SmpDate < @end
+          AND b.U_status IN ('S', 'UI', 'A', 'R', 'P', 'CA', 'CR', 'C')
+        GROUP BY b.U_status;
+
+        SELECT
+          a.DocNum AS SamplingNo,
+          a.U_SmpDate AS SamplingDate,
+          b.U_ItemCode AS ItemCode,
+          b.U_ItemName AS ItemName,
+          b.U_Batch AS Batch,
+          b.U_SmpQty AS SampleQty,
+          CASE b.U_status
+            WHEN 'S' THEN 'Sampled'
+            WHEN 'UI' THEN 'Under Inspection'
+            WHEN 'A' THEN 'Accepted'
+            WHEN 'R' THEN 'Rejected'
+            WHEN 'P' THEN 'Pending'
+            WHEN 'CA' THEN 'Conditionally Accepted'
+            WHEN 'CR' THEN 'Conditionally Rejected'
+            WHEN 'C' THEN 'Cancel'
+          END AS StatusName,
+          CASE a.U_Type
+            WHEN 20 THEN 'Goods Receipt PO'
+            WHEN 59 THEN 'Receipt From Production'
+            WHEN 16 THEN 'Sales Return'
+            WHEN 14 THEN 'A/R Credit Memo'
+            ELSE CAST(a.U_Type AS NVARCHAR(20))
+          END AS DocumentType,
+          a.U_DocNum AS DocumentNo,
+          a.U_CardName AS SupplierName
+        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
+        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
+        WHERE a.U_SmpDate >= @start AND a.U_SmpDate < @end
+          AND b.U_status IN ('S', 'UI', 'A', 'R', 'P', 'CA', 'CR', 'C')
+        ORDER BY a.U_SmpDate, a.DocNum
+      `);
+
+    const labels = {
+      S: "Sampled",
+      UI: "Under Inspection",
+      A: "Accepted",
+      R: "Rejected",
+      P: "Pending",
+      CA: "Conditionally Accepted",
+      CR: "Conditionally Rejected",
+      C: "Cancel",
+    };
+    const counts = Object.fromEntries(Object.keys(labels).map((code) => [code, 0]));
+    (result.recordsets?.[0] || []).forEach((row) => {
+      const code = row.StatusCode || "";
+      if (Object.prototype.hasOwnProperty.call(counts, code)) {
+        counts[code] = Number(row.LineCount) || 0;
+      }
+    });
+    counts.S = Object.values(counts).reduce((sum, value) => sum + value, 0);
+    const samples = (result.recordsets?.[1] || []).map((row) => ({
+      ...row,
+      SamplingDate: formatDate(row.SamplingDate),
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        cards: Object.entries(labels).map(([code, label]) => ({
+          code,
+          label,
+          count: counts[code],
+        })),
+        samples,
+      },
+    });
+  } catch (error) {
+    console.error("Error in getMonthlySampleStatus:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMonthlyProductionAnalytics = async (req, res) => {
+  try {
+    const month = Number(req.query.month);
+    const year = Number(req.query.year);
+    if (!month || !year || month < 1 || month > 12) {
+      return res.status(400).json({ success: false, message: "month and year are required" });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input("month", sql.Int, month)
+      .input("year", sql.Int, year)
+      .query(`
+        DECLARE @start DATE = DATEFROMPARTS(@year, @month, 1);
+        DECLARE @end DATE = DATEADD(MONTH, 1, @start);
+        DECLARE @prevStart DATE = DATEADD(MONTH, -1, @start);
+        DECLARE @trendStart DATE = DATEADD(MONTH, -11, @start);
+        DECLARE @today DATE = CAST(GETDATE() AS DATE);
+
+        SELECT
+          SUM(ISNULL(T0.PlannedQty, 0)) AS PlannedQty,
+          SUM(ISNULL(T0.CmpltQty, 0)) AS CompletedQty,
+          SUM(CASE WHEN ISNULL(T0.PlannedQty, 0) > ISNULL(T0.CmpltQty, 0)
+            THEN ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) ELSE 0 END) AS RemainingQty,
+          SUM(CASE WHEN T0.Status = 'R' AND ISNULL(T0.PlannedQty, 0) > ISNULL(T0.CmpltQty, 0)
+            THEN ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) ELSE 0 END) AS InProcessQty,
+          SUM(CASE WHEN T0.Status = 'R' THEN 1 ELSE 0 END) AS InProgressOrders,
+          SUM(CASE WHEN T0.Status = 'L' AND T0.CloseDate >= @start AND T0.CloseDate < @end THEN 1 ELSE 0 END) AS ClosedOrders
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.DueDate >= @start AND T0.DueDate < @end AND T0.Status <> 'C';
+
+        SELECT
+          SUM(ISNULL(T0.PlannedQty, 0)) AS PlannedQty,
+          SUM(ISNULL(T0.CmpltQty, 0)) AS CompletedQty,
+          SUM(CASE WHEN T0.Status IN ('R', 'P') AND T0.DueDate < @today AND ISNULL(T0.CmpltQty, 0) < ISNULL(T0.PlannedQty, 0) THEN 1 ELSE 0 END) AS DelayedOrders,
+          SUM(CASE WHEN T0.Status = 'L' AND T0.CloseDate >= @prevStart AND T0.CloseDate < @start THEN 1 ELSE 0 END) AS ClosedOrders
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.DueDate >= @prevStart AND T0.DueDate < @start AND T0.Status <> 'C';
+
+        SELECT
+          T0.DocNum AS ProductionOrderNo,
+          T0.ProdName AS ProductName,
+          T0.PlannedQty,
+          T0.CmpltQty AS CompletedQty,
+          ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) AS RemainingQty,
+          T0.DueDate,
+          CASE T0.Status WHEN 'P' THEN 'Planned' WHEN 'R' THEN 'Released' ELSE T0.Status END AS StatusName,
+          DATEDIFF(DAY, T0.DueDate, @today) AS DaysOverdue
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.DueDate >= @start AND T0.DueDate < @end
+          AND T0.DueDate < @today
+          AND T0.Status IN ('R', 'P')
+          AND ISNULL(T0.CmpltQty, 0) < ISNULL(T0.PlannedQty, 0)
+        ORDER BY T0.DueDate, T0.DocNum;
+
+        SELECT
+          YEAR(T0.DueDate) AS ReportYear,
+          MONTH(T0.DueDate) AS ReportMonth,
+          SUM(ISNULL(T0.PlannedQty, 0)) AS PlannedQty,
+          SUM(ISNULL(T0.CmpltQty, 0)) AS CompletedQty,
+          SUM(CASE WHEN T0.Status = 'R' AND ISNULL(T0.PlannedQty, 0) > ISNULL(T0.CmpltQty, 0)
+            THEN ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) ELSE 0 END) AS InProcessQty
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.DueDate >= @trendStart AND T0.DueDate < @end AND T0.Status <> 'C'
+        GROUP BY YEAR(T0.DueDate), MONTH(T0.DueDate)
+        ORDER BY YEAR(T0.DueDate), MONTH(T0.DueDate);
+
+        SELECT
+          T0.ItemCode,
+          T0.ProdName AS ProductName,
+          SUM(ISNULL(T0.PlannedQty, 0)) AS PlannedQty,
+          SUM(ISNULL(T0.CmpltQty, 0)) AS CompletedQty,
+          SUM(CASE WHEN ISNULL(T0.PlannedQty, 0) > ISNULL(T0.CmpltQty, 0)
+            THEN ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) ELSE 0 END) AS RemainingQty
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.DueDate >= @start AND T0.DueDate < @end AND T0.Status <> 'C'
+        GROUP BY T0.ItemCode, T0.ProdName
+        ORDER BY SUM(ISNULL(T0.PlannedQty, 0)) DESC;
+
+        SELECT
+          ISNULL(G.ItmsGrpNam, 'Unassigned') AS ItemGroup,
+          SUM(ISNULL(T0.PlannedQty, 0)) AS PlannedQty,
+          SUM(ISNULL(T0.CmpltQty, 0)) AS CompletedQty,
+          SUM(CASE WHEN ISNULL(T0.PlannedQty, 0) > ISNULL(T0.CmpltQty, 0)
+            THEN ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) ELSE 0 END) AS RemainingQty
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        LEFT JOIN LDS_LIVE.dbo.OITM I WITH (NOLOCK) ON T0.ItemCode = I.ItemCode
+        LEFT JOIN LDS_LIVE.dbo.OITB G WITH (NOLOCK) ON I.ItmsGrpCod = G.ItmsGrpCod
+        WHERE T0.DueDate >= @start AND T0.DueDate < @end AND T0.Status <> 'C'
+        GROUP BY G.ItmsGrpNam
+        ORDER BY SUM(ISNULL(T0.PlannedQty, 0)) DESC;
+
+        SELECT
+          AVG(CAST(DATEDIFF(DAY, T0.StartDate, T0.CloseDate) AS FLOAT)) AS AverageDays,
+          COUNT(*) AS ClosedOrders
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        WHERE T0.Status = 'L'
+          AND T0.CloseDate >= @start AND T0.CloseDate < @end
+          AND T0.StartDate IS NOT NULL
+          AND T0.CloseDate >= T0.StartDate;
+
+        SELECT b.U_status AS StatusCode, COUNT(*) AS LineCount
+        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
+        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
+        WHERE a.U_SmpDate >= @start AND a.U_SmpDate < @end
+          AND b.U_status IN ('S', 'UI', 'A', 'R', 'P', 'CA', 'CR', 'C')
+        GROUP BY b.U_status;
+
+        SELECT b.U_status AS StatusCode, COUNT(*) AS LineCount
+        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
+        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
+        WHERE a.U_SmpDate >= @prevStart AND a.U_SmpDate < @start
+          AND b.U_status IN ('A', 'R', 'CA', 'CR')
+        GROUP BY b.U_status;
+
+        SELECT TOP 8
+          ISNULL(G.ItmsGrpNam, 'Unassigned') AS ItemGroup,
+          SUM(CASE WHEN ISNULL(T0.PlannedQty, 0) > ISNULL(T0.CmpltQty, 0)
+            THEN ISNULL(T0.PlannedQty, 0) - ISNULL(T0.CmpltQty, 0) ELSE 0 END) AS RemainingQty,
+          COUNT(*) AS OrderCount
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        LEFT JOIN LDS_LIVE.dbo.OITM I WITH (NOLOCK) ON T0.ItemCode = I.ItemCode
+        LEFT JOIN LDS_LIVE.dbo.OITB G WITH (NOLOCK) ON I.ItmsGrpCod = G.ItmsGrpCod
+        WHERE T0.DueDate >= @start AND T0.DueDate < @end
+          AND T0.Status = 'R'
+          AND ISNULL(T0.CmpltQty, 0) < ISNULL(T0.PlannedQty, 0)
+        GROUP BY G.ItmsGrpNam
+        ORDER BY RemainingQty DESC;
+      `);
+
+    const sets = result.recordsets || [];
+    const current = sets[0]?.[0] || {};
+    const previous = sets[1]?.[0] || {};
+    const rate = (completed, planned) => {
+      const plan = Number(planned) || 0;
+      if (plan <= 0) return null;
+      return Number(((Number(completed) || 0) / plan * 100).toFixed(1));
+    };
+    const num = (value) => Number(value) || 0;
+    const withPct = (rows) => rows.map((row) => ({
+      ...row,
+      PlannedQty: num(row.PlannedQty),
+      CompletedQty: num(row.CompletedQty),
+      RemainingQty: num(row.RemainingQty),
+      CompletionPct: rate(row.CompletedQty, row.PlannedQty),
+    }));
+
+    const qualityMap = (rows) => {
+      const counts = { S: 0, UI: 0, A: 0, R: 0, P: 0, CA: 0, CR: 0, C: 0 };
+      (rows || []).forEach((row) => {
+        if (Object.prototype.hasOwnProperty.call(counts, row.StatusCode)) {
+          counts[row.StatusCode] = num(row.LineCount);
+        }
+      });
+      const inspected = counts.A + counts.R + counts.CA + counts.CR;
+      return {
+        inspected,
+        accepted: counts.A,
+        rejected: counts.R,
+        awaiting: counts.UI,
+        acceptanceRate: inspected > 0 ? Number((counts.A / inspected * 100).toFixed(1)) : null,
+        rejectionRate: inspected > 0 ? Number((counts.R / inspected * 100).toFixed(1)) : null,
+      };
+    };
+
+    const delayed = (sets[2] || []).map((row) => ({
+      ...row,
+      DueDate: formatDate(row.DueDate),
+      PlannedQty: num(row.PlannedQty),
+      CompletedQty: num(row.CompletedQty),
+      RemainingQty: num(row.RemainingQty),
+      DaysOverdue: num(row.DaysOverdue),
+    }));
+    const overdueQty = delayed.reduce((sum, row) => sum + row.RemainingQty, 0);
+    const maxOverdue = delayed.reduce((max, row) => Math.max(max, row.DaysOverdue), 0);
+    const quality = qualityMap(sets[7]);
+    const previousQuality = qualityMap(sets[8]);
+    const completionRate = rate(current.CompletedQty, current.PlannedQty);
+    const previousCompletionRate = rate(previous.CompletedQty, previous.PlannedQty);
+    const pointChange = (currentValue, previousValue) => {
+      if (currentValue == null || previousValue == null) return null;
+      return Number((currentValue - previousValue).toFixed(1));
+    };
+    const pctChange = (currentValue, previousValue) => {
+      const prev = Number(previousValue) || 0;
+      if (prev === 0) return null;
+      return Number((((Number(currentValue) || 0) - prev) / prev * 100).toFixed(1));
+    };
+
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    res.status(200).json({
+      success: true,
+      data: {
+        notes: {
+          cohort: "Orders with DueDate in the selected month, excluding cancelled.",
+          quantities: "OWOR PlannedQty and CmpltQty. Remaining quantity is not added across item groups as a single total because units can differ.",
+          delayed: "Planned or Released, due date in the selected month, due date before today, and completed quantity still below planned quantity.",
+          trend: "Last 12 months by DueDate. Completed is CmpltQty currently stored on those orders.",
+          quality: "One row per sample line. Inspected is Accepted, Rejected, Conditionally Accepted, and Conditionally Rejected. Acceptance and rejection rates use Accepted and Rejected only over that inspected total.",
+          averageTime: "Closed orders whose CloseDate is in the selected month, from StartDate to CloseDate.",
+          resource: "Not shown. WOR1 quantities are component issues, not finished-goods output.",
+        },
+        completion: {
+          rate: completionRate,
+          plannedQty: num(current.PlannedQty),
+          completedQty: num(current.CompletedQty),
+          remainingQty: num(current.RemainingQty),
+          inProcessQty: num(current.InProcessQty),
+          inProgressOrders: num(current.InProgressOrders),
+          closedOrders: num(current.ClosedOrders),
+        },
+        delayed: {
+          totalOrders: delayed.length,
+          overdueQty,
+          maxDaysOverdue: delayed.length ? maxOverdue : 0,
+          orders: delayed,
+        },
+        trend: (sets[3] || []).map((row) => ({
+          label: `${monthNames[Number(row.ReportMonth) - 1]} ${row.ReportYear}`,
+          plannedQty: num(row.PlannedQty),
+          completedQty: num(row.CompletedQty),
+          inProcessQty: num(row.InProcessQty),
+        })),
+        byProduct: withPct(sets[4] || []),
+        byItemGroup: withPct(sets[5] || []),
+        averageCompletionDays: sets[6]?.[0]?.AverageDays == null ? null : Number(Number(sets[6][0].AverageDays).toFixed(1)),
+        averageCompletionOrders: num(sets[6]?.[0]?.ClosedOrders),
+        quality,
+        bottlenecks: (sets[9] || []).map((row) => ({
+          ItemGroup: row.ItemGroup,
+          RemainingQty: num(row.RemainingQty),
+          OrderCount: num(row.OrderCount),
+        })),
+        comparison: {
+          completionRate: pointChange(completionRate, previousCompletionRate),
+          completedQty: pctChange(current.CompletedQty, previous.CompletedQty),
+          closedOrders: pctChange(current.ClosedOrders, previous.ClosedOrders),
+          delayedOrders: pctChange(
+            delayed.length,
+            num(previous.DelayedOrders),
+          ),
+          acceptanceRate: pointChange(quality.acceptanceRate, previousQuality.acceptanceRate),
+          rejectionRate: pointChange(quality.rejectionRate, previousQuality.rejectionRate),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error in getMonthlyProductionAnalytics:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getOrderStatusSummary = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT
+        CASE T0.Status
+          WHEN 'P' THEN 'Planned'
+          WHEN 'R' THEN 'Released'
+          WHEN 'L' THEN 'Closed'
+          WHEN 'C' THEN 'Cancelled'
+          ELSE ISNULL(T0.Status, 'Unknown')
+        END AS StatusName,
+        COUNT(*) AS TotalOrders
+      FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+      GROUP BY T0.Status
+    `);
+
+    const counts = { Planned: 0, Released: 0, Closed: 0, Cancelled: 0 };
+    (result.recordset || []).forEach((row) => {
+      counts[row.StatusName] = Number(row.TotalOrders) || 0;
+    });
+    const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total,
+        ...counts,
+      },
+    });
+  } catch (error) {
+    console.error("Error in getOrderStatusSummary:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
