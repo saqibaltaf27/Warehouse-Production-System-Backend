@@ -301,21 +301,40 @@ exports.getSavedSamples = async (req, res) => {
     let whereClause = '';
     let extraSelect = '';
     
+    const conditions = [];
+    const allowedStatuses = ['A', 'UI', 'P', 'S', 'R', 'CA', 'CR', 'C'];
+
     if (req.query.status) {
        joinClause = `JOIN DOME.dbo.[@XD_SMP1] b ON a.docentry = b.docentry`;
-       // Statuses can be comma separated, e.g. 'S,UI'
-       const statuses = req.query.status.split(',').map(s => `'${s.trim()}'`).join(',');
-       whereClause = `WHERE b.U_status IN (${statuses})`;
+       const statuses = req.query.status.split(',').map(s => s.trim()).filter(s => allowedStatuses.includes(s));
+       if (statuses.length) {
+         conditions.push(`b.U_status IN (${statuses.map(s => `'${s}'`).join(',')})`);
+       }
        extraSelect = `, b.U_ItemName as [Item Name], b.U_Batch as [Batch]`;
     }
 
-    if (req.query.currentMonth === 'true') {
-       const monthCondition = `a.U_SmpDate >= DATEADD(month, DATEDIFF(month, 0, GETDATE()), 0)`;
-       if (whereClause) {
-          whereClause += ` AND ${monthCondition}`;
-       } else {
-          whereClause = `WHERE ${monthCondition}`;
-       }
+    if (req.query.docType) {
+       request.input('docType', sql.Int, parseInt(req.query.docType, 10));
+       conditions.push('a.U_Type = @docType');
+    }
+
+    if (req.query.fromDate) {
+       request.input('fromDate', sql.Date, req.query.fromDate);
+       conditions.push('CAST(a.U_SmpDate AS date) >= @fromDate');
+    }
+
+    if (req.query.toDate) {
+       request.input('toDate', sql.Date, req.query.toDate);
+       conditions.push('CAST(a.U_SmpDate AS date) <= @toDate');
+    }
+
+    if (req.query.currentMonth === 'true' && !req.query.fromDate && !req.query.toDate) {
+       conditions.push(`a.U_SmpDate >= DATEADD(month, DATEDIFF(month, 0, GETDATE()), 0)`);
+       conditions.push(`a.U_SmpDate < DATEADD(month, DATEDIFF(month, 0, GETDATE()) + 1, 0)`);
+    }
+
+    if (conditions.length) {
+       whereClause = `WHERE ${conditions.join(' AND ')}`;
     }
     
     const countQuery = `SELECT COUNT(DISTINCT a.Docnum) as total FROM DOME.dbo.[@XD_OSMP] a ${joinClause} ${whereClause}`;
@@ -335,7 +354,24 @@ exports.getSavedSamples = async (req, res) => {
         a.U_CardCode as [Supplier Code],
         a.U_Cardname as [Supplier Name],
         a.U_BPLId as [Branch],
-        a.U_DocEntry as [Document Entry]
+        a.U_DocEntry as [Document Entry],
+        STUFF((
+          SELECT DISTINCT ', ' +
+            CASE b.U_status
+              WHEN 'A' THEN 'Accepted'
+              WHEN 'UI' THEN 'Under Inspection'
+              WHEN 'P' THEN 'Pending'
+              WHEN 'S' THEN 'Sampled'
+              WHEN 'R' THEN 'Rejected'
+              WHEN 'CA' THEN 'Conditionally Accepted'
+              WHEN 'CR' THEN 'Conditionally Rejected'
+              WHEN 'C' THEN 'Cancel'
+              ELSE b.U_status
+            END
+          FROM DOME.dbo.[@XD_SMP1] b
+          WHERE b.DocEntry = a.DocEntry
+          FOR XML PATH(''), TYPE
+        ).value('.', 'nvarchar(max)'), 1, 2, '') AS [Status]
         ${extraSelect}
       from DOME.dbo.[@XD_OSMP] a
       ${joinClause}
