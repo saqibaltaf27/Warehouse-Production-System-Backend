@@ -814,7 +814,7 @@ exports.getWarehouses = async (req, res) => {
 
 exports.getQcOverview = async (req, res) => {
   try {
-    const { month, year } = req.query;
+    const { month, year, startDate, endDate } = req.query;
     const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
     const targetYear = year ? parseInt(year) : new Date().getFullYear();
 
@@ -822,6 +822,8 @@ exports.getQcOverview = async (req, res) => {
     const request = pool.request();
     request.input('targetMonth', targetMonth);
     request.input('targetYear', targetYear);
+    request.input('rangeStart', sql.Date, startDate || null);
+    request.input('rangeEnd', sql.Date, endDate || null);
 
     const result = await request.query(`
       SELECT 
@@ -851,7 +853,10 @@ exports.getQcOverview = async (req, res) => {
         WHERE BaseType = 202
         GROUP BY BaseEntry
       ) IGN ON O.DocEntry = IGN.BaseEntry
-      WHERE MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+      WHERE (
+        @rangeStart IS NOT NULL AND O.PostDate >= @rangeStart AND O.PostDate < DATEADD(DAY, 1, @rangeEnd)
+        OR @rangeStart IS NULL AND MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+      )
         AND G.ItmsGrpNam LIKE 'FG%'
       GROUP BY G.ItmsGrpNam, I.ItemName
     `);
@@ -868,7 +873,7 @@ exports.getQcOverview = async (req, res) => {
 
 exports.getTopProductsCostTrend = async (req, res) => {
   try {
-    const { month, year } = req.query;
+    const { month, year, startDate, endDate } = req.query;
     const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1;
     const targetYear = year ? parseInt(year) : new Date().getFullYear();
 
@@ -876,6 +881,8 @@ exports.getTopProductsCostTrend = async (req, res) => {
     const request = pool.request();
     request.input('targetMonth', targetMonth);
     request.input('targetYear', targetYear);
+    request.input('rangeStart', sql.Date, startDate || null);
+    request.input('rangeEnd', sql.Date, endDate || null);
 
     const productsResult = await request.query(`
       SELECT
@@ -893,7 +900,10 @@ exports.getTopProductsCostTrend = async (req, res) => {
         WHERE BaseType = 202
         GROUP BY BaseEntry
       ) IGN ON O.DocEntry = IGN.BaseEntry
-      WHERE MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+      WHERE (
+        @rangeStart IS NOT NULL AND O.PostDate >= @rangeStart AND O.PostDate < DATEADD(DAY, 1, @rangeEnd)
+        OR @rangeStart IS NULL AND MONTH(O.PostDate) = @targetMonth AND YEAR(O.PostDate) = @targetYear
+      )
         AND G.ItmsGrpNam LIKE 'FG%'
         AND ISNULL(IGN.ProducedQty, 0) > 0
       GROUP BY I.ItemCode, I.ItemName, O.DocNum
@@ -932,7 +942,7 @@ exports.getMonthlyProductionAchievement = async (req, res) => {
   try {
     const month = Number(req.query.month);
     const year = Number(req.query.year);
-    if (!month || !year || month < 1 || month > 12) {
+    if (!req.query.startDate && (!month || !year || month < 1 || month > 12)) {
       return res.status(400).json({ success: false, message: "month and year are required" });
     }
 
@@ -943,14 +953,16 @@ exports.getMonthlyProductionAchievement = async (req, res) => {
 
     const pool = await poolPromise;
     const result = await pool.request()
-      .input("month", sql.Int, month)
-      .input("year", sql.Int, year)
+      .input("month", sql.Int, month || 1)
+      .input("year", sql.Int, year || 2000)
+      .input("rangeStart", sql.Date, req.query.startDate || null)
+      .input("rangeEnd", sql.Date, req.query.endDate || null)
       .input("offset", sql.Int, offset)
       .input("limit", sql.Int, limit)
       .input("search", sql.NVarChar, search)
       .query(`
-        DECLARE @start DATE = DATEFROMPARTS(@year, @month, 1);
-        DECLARE @end DATE = DATEADD(MONTH, 1, @start);
+        DECLARE @start DATE = CASE WHEN @rangeStart IS NOT NULL THEN @rangeStart ELSE DATEFROMPARTS(@year, @month, 1) END;
+        DECLARE @end DATE = CASE WHEN @rangeEnd IS NOT NULL THEN DATEADD(DAY, 1, @rangeEnd) ELSE DATEADD(MONTH, 1, @start) END;
 
         SELECT
           COUNT(*) AS DueInMonth,
@@ -1039,7 +1051,7 @@ exports.getMonthlySampleStatus = async (req, res) => {
   try {
     const month = Number(req.query.month);
     const year = Number(req.query.year);
-    if (!month || !year || month < 1 || month > 12) {
+    if (!req.query.startDate && (!month || !year || month < 1 || month > 12)) {
       return res.status(400).json({ success: false, message: "month and year are required" });
     }
 
@@ -1050,14 +1062,16 @@ exports.getMonthlySampleStatus = async (req, res) => {
 
     const pool = await poolPromise;
     const result = await pool.request()
-      .input("month", sql.Int, month)
-      .input("year", sql.Int, year)
+      .input("month", sql.Int, month || 1)
+      .input("year", sql.Int, year || 2000)
+      .input("rangeStart", sql.Date, req.query.startDate || null)
+      .input("rangeEnd", sql.Date, req.query.endDate || null)
       .input("offset", sql.Int, offset)
       .input("limit", sql.Int, limit)
       .input("search", sql.NVarChar, search)
       .query(`
-        DECLARE @start DATE = DATEFROMPARTS(@year, @month, 1);
-        DECLARE @end DATE = DATEADD(MONTH, 1, @start);
+        DECLARE @start DATE = CASE WHEN @rangeStart IS NOT NULL THEN @rangeStart ELSE DATEFROMPARTS(@year, @month, 1) END;
+        DECLARE @end DATE = CASE WHEN @rangeEnd IS NOT NULL THEN DATEADD(DAY, 1, @rangeEnd) ELSE DATEADD(MONTH, 1, @start) END;
 
         SELECT b.U_status AS StatusCode, COUNT(*) AS LineCount
         FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
@@ -1168,16 +1182,28 @@ exports.getMonthlySampleStatus = async (req, res) => {
 
 exports.getMonthlyProductionAnalytics = async (req, res) => {
   try {
+    const now = new Date();
+    const month = Number(req.query.month) || now.getMonth() + 1;
+    const year = Number(req.query.year) || now.getFullYear();
+    const item = String(req.query.item || "").trim();
     const pool = await poolPromise;
     const result = await pool.request()
+      .input("month", sql.Int, month)
+      .input("year", sql.Int, year)
+      .input("rangeStart", sql.Date, req.query.startDate || null)
+      .input("rangeEnd", sql.Date, req.query.endDate || null)
+      .input("item", sql.NVarChar, item)
       .query(`
         DECLARE @monthStart DATE = DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1);
+        DECLARE @selectedStart DATE = CASE WHEN @rangeStart IS NOT NULL THEN @rangeStart ELSE DATEFROMPARTS(@year, @month, 1) END;
+        DECLARE @selectedEnd DATE = CASE WHEN @rangeEnd IS NOT NULL THEN DATEADD(DAY, 1, @rangeEnd) ELSE DATEADD(MONTH, 1, @selectedStart) END;
         DECLARE @end DATE = DATEADD(MONTH, 1, @monthStart);
         DECLARE @trendStart DATE = DATEADD(MONTH, -11, @monthStart);
 
         SELECT
           ReportYear,
           ReportMonth,
+          ItemGroup AS ItemName,
           SUM(PlannedQty) AS PlannedQty,
           SUM(CompletedQty) AS CompletedQty,
           SUM(InProcessQty) AS InProcessQty
@@ -1185,6 +1211,7 @@ exports.getMonthlyProductionAnalytics = async (req, res) => {
           SELECT
             YEAR(O.PostDate) AS ReportYear,
             MONTH(O.PostDate) AS ReportMonth,
+            G.ItmsGrpNam AS ItemGroup,
             SUM(O.PlannedQty) AS PlannedQty,
             CASE
               WHEN SUM(ISNULL(IGN.ProducedQty, 0)) > SUM(O.PlannedQty) THEN SUM(O.PlannedQty)
@@ -1205,10 +1232,33 @@ exports.getMonthlyProductionAnalytics = async (req, res) => {
           ) IGN ON O.DocEntry = IGN.BaseEntry
           WHERE O.PostDate >= @trendStart AND O.PostDate < @end
             AND G.ItmsGrpNam LIKE 'FG%'
+            AND (@item = '' OR G.ItmsGrpNam = @item)
           GROUP BY YEAR(O.PostDate), MONTH(O.PostDate), G.ItmsGrpNam, I.ItemName
         ) AS ProductMonths
-        GROUP BY ReportYear, ReportMonth
-        ORDER BY ReportYear, ReportMonth;
+        GROUP BY ReportYear, ReportMonth, ItemGroup
+        ORDER BY ReportYear, ReportMonth, ItemGroup;
+
+        SELECT
+          G.ItmsGrpNam AS ItemName,
+          SUM(O.PlannedQty) AS PlannedQty,
+          SUM(ISNULL(IGN.ProducedQty, 0)) AS CompletedQty,
+          CASE
+            WHEN SUM(O.PlannedQty) - SUM(ISNULL(IGN.ProducedQty, 0)) < 0 THEN 0
+            ELSE SUM(O.PlannedQty) - SUM(ISNULL(IGN.ProducedQty, 0))
+          END AS InProcessQty
+        FROM LDS_LIVE.dbo.OWOR O WITH (NOLOCK)
+        LEFT JOIN LDS_LIVE.dbo.OITM I WITH (NOLOCK) ON O.ItemCode = I.ItemCode
+        LEFT JOIN LDS_LIVE.dbo.OITB G WITH (NOLOCK) ON I.ItmsGrpCod = G.ItmsGrpCod
+        LEFT JOIN (
+          SELECT BaseEntry, SUM(Quantity) AS ProducedQty
+          FROM LDS_LIVE.dbo.IGN1 WITH (NOLOCK)
+          WHERE BaseType = 202
+          GROUP BY BaseEntry
+        ) IGN ON O.DocEntry = IGN.BaseEntry
+        WHERE O.PostDate >= @trendStart AND O.PostDate < @end
+          AND G.ItmsGrpNam LIKE 'FG%'
+        GROUP BY G.ItmsGrpNam
+        ORDER BY G.ItmsGrpNam;
       `);
 
     const num = (value) => Number(value) || 0;
@@ -1217,8 +1267,20 @@ exports.getMonthlyProductionAnalytics = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        trend: (result.recordset || []).map((row) => ({
-          label: `${monthNames[Number(row.ReportMonth) - 1]} ${row.ReportYear}`,
+        trend: (() => {
+          const points = new Map();
+          (result.recordsets?.[0] || []).forEach((row) => {
+            const label = `${monthNames[Number(row.ReportMonth) - 1]} ${row.ReportYear}`;
+            if (!points.has(label)) points.set(label, { label });
+            const point = points.get(label);
+            point[row.ItemName] = num(row.CompletedQty);
+            point[`${row.ItemName}|planned`] = num(row.PlannedQty);
+            point[`${row.ItemName}|inProcess`] = num(row.InProcessQty);
+          });
+          return Array.from(points.values());
+        })(),
+        products: (result.recordsets?.[1] || []).map((row) => ({
+          itemName: row.ItemName,
           plannedQty: num(row.PlannedQty),
           completedQty: num(row.CompletedQty),
           inProcessQty: num(row.InProcessQty),
