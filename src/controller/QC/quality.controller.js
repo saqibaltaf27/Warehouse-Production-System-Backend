@@ -299,10 +299,17 @@ exports.getItemByCode = async (req, res) => {
       ORDER BY LineId
     `;
     const linesResult = await request.query(linesQuery);
+
+    const nameResult = await request.query(`
+      SELECT TOP 1 ItemName
+      FROM LDS_live.dbo.OITM
+      WHERE ItemCode COLLATE DATABASE_DEFAULT = @ItemCode COLLATE DATABASE_DEFAULT
+    `);
     
     res.json({
       success: true,
       data: headerData,
+      itemName: nameResult.recordset[0]?.ItemName || null,
       lines: linesResult.recordset
     });
   } catch (err) {
@@ -504,18 +511,19 @@ exports.createQualityRecord = async (req, res) => {
       txRequest.input('U_RejWhs', sql.NVarChar, data.rejectionWarehouse || null);
       txRequest.input('U_AcpITR', sql.NVarChar, data.acceptedITR || null);
       txRequest.input('U_RejITR', sql.NVarChar, data.rejectedITR || null);
+      txRequest.input('U_SampleNumber', sql.Int, data.samplingNo ? parseInt(data.samplingNo, 10) : null);
 
       const insertHeaderQuery = `
         INSERT INTO [DOME].[dbo].[@XD_OQUL] (
           DocEntry, DocNum, U_QCType, U_Type, U_ItemCode, U_ItemName, 
           U_SmpQty, U_Batch, U_Qty, U_ExpDate, CreateDate, U_InpBy, U_InpByName,
           U_SmpBy, U_SmpByName, U_AnlyzBy, U_AnlyzByName, U_RevBy, U_RevByName, U_RepBy, U_RepByName,
-          U_QCDecision, U_AccpQty, U_RejQty, U_AcpWhs, U_RejWhs, U_AcpITR, U_RejITR
+          U_QCDecision, U_AccpQty, U_RejQty, U_AcpWhs, U_RejWhs, U_AcpITR, U_RejITR, U_SampleNumber
         ) VALUES (
           @DocEntry, @DocNum, @U_QCType, @U_Type, @U_ItemCode, @U_ItemName, 
           @U_SmpQty, @U_Batch, @U_Qty, @U_ExpDate, @CreateDate, @U_InpBy, @U_InpByName,
           @U_SmpBy, @U_SmpByName, @U_AnlyzBy, @U_AnlyzByName, @U_RevBy, @U_RevByName, @U_RepBy, @U_RepByName,
-          @U_QCDecision, @U_AccpQty, @U_RejQty, @U_AcpWhs, @U_RejWhs, @U_AcpITR, @U_RejITR
+          @U_QCDecision, @U_AccpQty, @U_RejQty, @U_AcpWhs, @U_RejWhs, @U_AcpITR, @U_RejITR, @U_SampleNumber
         )
       `;
       
@@ -575,6 +583,70 @@ exports.createQualityRecord = async (req, res) => {
     
   } catch (err) {
     console.error("Error in createQualityRecord:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getTestingStandards = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const offset = (page - 1) * limit;
+    const search = String(req.query.search || '').trim();
+
+    const pool = await poolPromise;
+    const request = pool.request();
+    request.input('offset', sql.Int, offset);
+    request.input('limit', sql.Int, limit);
+    request.input('search', sql.NVarChar, `%${search}%`);
+
+    const fromWhere = `
+      FROM (
+        SELECT
+          H0.U_ItemCode,
+          MAX(H0.DocEntry) AS DocEntry
+        FROM [DOME].[dbo].[@XD_OITS] H0
+        WHERE NULLIF(LTRIM(RTRIM(H0.U_ItemCode)), '') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM [DOME].[dbo].[@XD_ITS1] L WHERE L.DocEntry = H0.DocEntry
+          )
+        GROUP BY H0.U_ItemCode
+      ) Latest
+      INNER JOIN [DOME].[dbo].[@XD_OITS] H ON H.DocEntry = Latest.DocEntry
+      OUTER APPLY (
+        SELECT TOP 1 I.ItemName
+        FROM LDS_live.dbo.OITM I
+        WHERE I.ItemCode COLLATE DATABASE_DEFAULT = H.U_ItemCode COLLATE DATABASE_DEFAULT
+      ) Item
+      WHERE (
+        @search = N'%%'
+        OR H.U_ItemCode LIKE @search
+        OR Item.ItemName COLLATE DATABASE_DEFAULT LIKE @search COLLATE DATABASE_DEFAULT
+      )
+    `;
+
+    const countResult = await request.query(`SELECT COUNT(*) AS total ${fromWhere}`);
+    const total = countResult.recordset[0]?.total || 0;
+
+    const dataResult = await request.query(`
+      SELECT
+        H.DocEntry,
+        H.U_ItemCode AS ItemCode,
+        Item.ItemName,
+        H.U_SampleSize AS SampleSize,
+        (SELECT COUNT(*) FROM [DOME].[dbo].[@XD_ITS1] L WHERE L.DocEntry = H.DocEntry) AS ParameterCount
+      ${fromWhere}
+      ORDER BY H.DocEntry DESC
+      OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
+    `);
+
+    res.json({
+      success: true,
+      data: dataResult.recordset,
+      pagination: { total, page, limit }
+    });
+  } catch (err) {
+    console.error("Error in getTestingStandards:", err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
