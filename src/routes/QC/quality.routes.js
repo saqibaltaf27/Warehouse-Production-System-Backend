@@ -10,6 +10,7 @@ router.get('/items', qualityController.getItems);
 router.get('/equipments', qualityController.getEquipments);
 router.get('/next-doc-entry', qualityController.getNextDocEntry);
 router.get('/item-by-code', qualityController.getItemByCode);
+router.get('/testing-standards', qualityController.getTestingStandards);
 router.get('/item-batches', qualityController.getItemBatches);
 router.get('/parameters', qualityController.getParameters);
 router.get('/employees', qualityController.getEmployees);
