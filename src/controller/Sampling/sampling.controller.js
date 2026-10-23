@@ -93,13 +93,15 @@ exports.getOpenDocuments = async (req, res) => {
     const offset = (page - 1) * limit;
     
     let tableName = '';
+    let lineTable = '';
     let hasSupplier = true;
+    let uType = 0;
     
     switch (docType) {
-      case 'Goods Receipt PO': tableName = 'OPDN'; break;
-      case 'Receipt From Production': tableName = 'OIGN'; hasSupplier = false; break;
-      case 'Sales Return': tableName = 'ORDN'; break;
-      case 'A/R Credit Memo': tableName = 'ORIN'; break;
+      case 'Goods Receipt PO': tableName = 'OPDN'; lineTable = 'PDN1'; uType = 20; break;
+      case 'Receipt From Production': tableName = 'OIGN'; lineTable = 'IGN1'; hasSupplier = false; uType = 59; break;
+      case 'Sales Return': tableName = 'ORDN'; lineTable = 'RDN1'; uType = 16; break;
+      case 'A/R Credit Memo': tableName = 'ORIN'; lineTable = 'RIN1'; uType = 14; break;
       default: return res.status(400).json({ success: false, message: 'Invalid docType' });
     }
     
@@ -107,34 +109,51 @@ exports.getOpenDocuments = async (req, res) => {
     const request = pool.request();
     request.input('offset', sql.Int, offset);
     request.input('limit', sql.Int, limit);
+    request.input('uType', sql.Int, uType);
     
     let searchCondition = '';
     if (search) {
       request.input('search', sql.NVarChar, `%${search}%`);
       if (hasSupplier) {
-        searchCondition = `AND (CAST(DocNum AS VARCHAR(50)) LIKE @search OR CardCode LIKE @search OR CardName LIKE @search)`;
+        searchCondition = `AND (CAST(T.DocNum AS VARCHAR(50)) LIKE @search OR T.CardCode LIKE @search OR T.CardName LIKE @search)`;
       } else {
-        // Search by ItemCode or ItemName for Receipt from production via EXISTS subquery
-        searchCondition = `AND (CAST(DocNum AS VARCHAR(50)) LIKE @search OR EXISTS (SELECT 1 FROM LDS_LIVE.dbo.IGN1 L WHERE L.DocEntry = LDS_LIVE.dbo.${tableName}.DocEntry AND (L.ItemCode LIKE @search OR L.Dscription LIKE @search)))`;
+        searchCondition = `AND (CAST(T.DocNum AS VARCHAR(50)) LIKE @search OR EXISTS (SELECT 1 FROM LDS_LIVE.dbo.IGN1 L WHERE L.DocEntry = T.DocEntry AND (L.ItemCode LIKE @search OR L.Dscription LIKE @search)))`;
       }
     }
+
+    // Hide documents that already have a sample, unless every sample line was cancelled.
+    const notSampledCondition = `
+      AND NOT EXISTS (
+        SELECT 1
+        FROM DOME.dbo.[@XD_OSMP] S
+        WHERE S.U_Type = @uType
+          AND S.U_DocEntry = T.DocEntry
+          AND (
+            NOT EXISTS (SELECT 1 FROM DOME.dbo.[@XD_SMP1] L WHERE L.DocEntry = S.DocEntry)
+            OR EXISTS (
+              SELECT 1 FROM DOME.dbo.[@XD_SMP1] L
+              WHERE L.DocEntry = S.DocEntry AND ISNULL(L.U_status, '') <> 'C'
+            )
+          )
+      )`;
     
-    const baseQuery = `FROM LDS_LIVE.dbo.${tableName} WHERE DocStatus = 'O' AND CANCELED = 'N' ${searchCondition}`;
+    const baseQuery = `FROM LDS_LIVE.dbo.${tableName} T WHERE T.DocStatus = 'O' AND T.CANCELED = 'N' ${notSampledCondition} ${searchCondition}`;
     
     const countResult = await request.query(`SELECT COUNT(*) as total ${baseQuery}`);
     const total = countResult.recordset[0].total;
     
+    const itemCountSql = `(SELECT COUNT(DISTINCT L.ItemCode) FROM LDS_LIVE.dbo.${lineTable} L WHERE L.DocEntry = T.DocEntry) AS ItemCount`;
     const selectCols = hasSupplier 
-      ? 'DocEntry, DocNum, CardCode, CardName, DocDate' 
-      : `DocEntry, DocNum, 
-         (SELECT TOP 1 ItemCode FROM LDS_LIVE.dbo.IGN1 WHERE DocEntry = LDS_LIVE.dbo.${tableName}.DocEntry) AS ItemCode, 
-         (SELECT TOP 1 Dscription FROM LDS_LIVE.dbo.IGN1 WHERE DocEntry = LDS_LIVE.dbo.${tableName}.DocEntry) AS ItemName, 
-         DocDate`;
+      ? `T.DocEntry, T.DocNum, T.CardCode, T.CardName, T.DocDate, ${itemCountSql}` 
+      : `T.DocEntry, T.DocNum, 
+         (SELECT TOP 1 ItemCode FROM LDS_LIVE.dbo.IGN1 WHERE DocEntry = T.DocEntry) AS ItemCode, 
+         (SELECT TOP 1 Dscription FROM LDS_LIVE.dbo.IGN1 WHERE DocEntry = T.DocEntry) AS ItemName, 
+         T.DocDate, ${itemCountSql}`;
     
     const dataQuery = `
       SELECT ${selectCols}
       ${baseQuery}
-      ORDER BY DocNum DESC
+      ORDER BY T.DocNum DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
     `;
     const dataResult = await request.query(dataQuery);
@@ -148,7 +167,8 @@ exports.getOpenDocuments = async (req, res) => {
            DocNum: r.DocNum,
            CardCode: r.CardCode || r.ItemCode || '',
            CardName: r.CardName || r.ItemName || '',
-           DocDate: r.DocDate
+           DocDate: r.DocDate,
+           ItemCount: r.ItemCount || 0
         })),
         total
       }
@@ -311,6 +331,16 @@ exports.getSavedSamples = async (req, res) => {
          conditions.push(`b.U_status IN (${statuses.map(s => `'${s}'`).join(',')})`);
        }
        extraSelect = `, b.U_ItemName as [Item Name], b.U_Batch as [Batch]`;
+    }
+
+    const search = String(req.query.search || '').trim();
+    if (search) {
+       request.input('search', sql.NVarChar, `%${search}%`);
+       conditions.push(`(
+         CAST(a.Docnum AS nvarchar(50)) LIKE @search
+         OR a.U_CardCode LIKE @search
+         OR a.U_Cardname LIKE @search
+       )`);
     }
 
     if (req.query.docType) {

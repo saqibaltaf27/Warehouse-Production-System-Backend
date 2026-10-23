@@ -11,9 +11,22 @@ exports.getQualityRecords = async (req, res) => {
     
     request.input('offset', sql.Int, offset);
     request.input('limit', sql.Int, limit);
-    
-    // Always exclude 'Accepted' ('A') records
-    const statusFilter = `WHERE ISNULL(H.U_QCDecision, '') <> 'A'`;
+
+    const conditions = [];
+    if (req.query.status) {
+      request.input('status', sql.NVarChar, req.query.status);
+      conditions.push('H.U_QCDecision = @status');
+    }
+    if (req.query.search) {
+      request.input('search', sql.NVarChar, `%${req.query.search}%`);
+      conditions.push(`(
+        CAST(H.DocNum AS VARCHAR(20)) LIKE @search
+        OR CAST(ISNULL(H.U_SampleNumber, '') AS VARCHAR(20)) LIKE @search
+        OR H.U_ItemCode LIKE @search
+        OR H.U_ItemName LIKE @search
+      )`);
+    }
+    const statusFilter = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     
     const countQuery = `SELECT COUNT(*) as total FROM DOME.dbo.[@XD_OQUL] H ${statusFilter}`;
     const countResult = await request.query(countQuery);
@@ -23,6 +36,7 @@ exports.getQualityRecords = async (req, res) => {
       SELECT
           H.DocEntry AS [Document Entry],
           H.DocNum AS [Document Number],
+          H.U_SampleNumber AS [Sample Number],
           case when H.U_QCType = 'B' then 'Based on Document'
           else 'Standalone' end as [QC Type],
           case when H.U_Type = 'M' then 'Material' 
@@ -144,6 +158,7 @@ exports.getQualityRecordDetails = async (req, res) => {
       SELECT
           H.DocEntry AS [Document Entry],
           H.DocNum AS [Document Number],
+          H.U_SampleNumber AS [Sample Number],
           case when H.U_QCType = 'B' then 'Based on Document'
           else 'Standalone' end as [QC Type],
           case when H.U_Type = 'M' then 'Material' 
@@ -283,11 +298,32 @@ exports.getItemByCode = async (req, res) => {
     `;
 
     const dataResult = await request.query(query);
-    
-    if (dataResult.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Item not found in @XD_OITS' });
+
+    let samplingQty = null;
+    if (req.query.samplingNo) {
+      const qtyRequest = pool.request();
+      qtyRequest.input('DocNum', sql.Int, parseInt(req.query.samplingNo, 10));
+      qtyRequest.input('ItemCode', sql.NVarChar, itemCode);
+      const qtyResult = await qtyRequest.query(`
+        SELECT TOP 1 L.U_SmpQty AS SampleQty
+        FROM DOME.dbo.[@XD_OSMP] H
+        INNER JOIN DOME.dbo.[@XD_SMP1] L ON L.DocEntry = H.DocEntry
+        WHERE H.DocNum = @DocNum AND L.U_ItemCode = @ItemCode
+        ORDER BY CASE WHEN ISNULL(L.U_SmpQty, 0) = 0 THEN 1 ELSE 0 END, L.LineId
+      `);
+      samplingQty = qtyResult.recordset[0]?.SampleQty ?? null;
     }
-    
+
+    if (dataResult.recordset.length === 0) {
+      return res.json({
+        success: true,
+        data: {},
+        itemName: null,
+        lines: [],
+        sampleQty: samplingQty
+      });
+    }
+
     const headerData = dataResult.recordset[0];
     const docEntry = headerData.DocEntry;
 
@@ -310,7 +346,8 @@ exports.getItemByCode = async (req, res) => {
       success: true,
       data: headerData,
       itemName: nameResult.recordset[0]?.ItemName || null,
-      lines: linesResult.recordset
+      lines: linesResult.recordset,
+      sampleQty: samplingQty
     });
   } catch (err) {
     console.error("Error in getItemByCode:", err);
@@ -486,7 +523,7 @@ exports.createQualityRecord = async (req, res) => {
       txRequest.input('U_Type', sql.NVarChar, data.type || 'M'); // 'M' Material or 'P' Process
       txRequest.input('U_ItemCode', sql.NVarChar, data.itemCode);
       txRequest.input('U_ItemName', sql.NVarChar, data.itemName);
-      txRequest.input('U_SmpQty', sql.Numeric, data.sampleQty ? parseFloat(data.sampleQty) : null);
+      txRequest.input('U_SmpQty', sql.Numeric(19, 6), data.sampleQty !== '' && data.sampleQty != null ? parseFloat(data.sampleQty) : null);
       txRequest.input('U_Batch', sql.NVarChar, data.selectedBatch);
       txRequest.input('U_Qty', sql.Numeric, data.batchQty ? parseFloat(data.batchQty) : null);
       txRequest.input('U_ExpDate', sql.Date, data.batchExpDate ? new Date(data.batchExpDate) : null);
