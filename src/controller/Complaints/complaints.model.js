@@ -327,7 +327,7 @@ class ComplaintsModel {
         request.input('ItemCode', sql.NVarChar, itemCode);
 
         const query = `
-            SELECT TOP 1
+            SELECT
                 T0.ItemName AS [PRODUCT],
                 T0.ItemCode AS [ITEM CODE],
                 T1.DistNumber AS [BATCH],
@@ -363,7 +363,7 @@ class ComplaintsModel {
         `;
         
         const result = await request.query(query);
-        return result.recordset[0] || null;
+        return result.recordset || [];
     }
 }
 

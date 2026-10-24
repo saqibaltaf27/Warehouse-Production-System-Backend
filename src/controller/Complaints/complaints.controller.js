@@ -75,12 +75,23 @@ class ComplaintsController {
                 return sendError(res, 'ItemCode is required', 400);
             }
             
-            const details = await complaintsModel.getCOAProductDetails(itemCode);
-            if (!details) {
+            const rows = await complaintsModel.getCOAProductDetails(itemCode);
+            if (!rows.length) {
                 return sendError(res, 'Product details not found', 404);
             }
-            
-            sendSuccess(res, details, "COA product details fetched successfully");
+
+            const details = rows[0];
+            const batches = rows
+                .filter((row) => row.BATCH)
+                .map((row) => ({
+                    batch: row.BATCH,
+                    batchSize: row['BATCH SIZE'] || '',
+                    mfgDate: row['MFG DATE'] || '',
+                    expDate: row['EXP DATE'] || '',
+                    bmrNo: row['BMR NO.'] || ''
+                }));
+
+            sendSuccess(res, { ...details, batches }, "COA product details fetched successfully");
         } catch (error) {
             console.error("Error getting COA product details:", error);
             sendError(res, 'Internal Server Error: ' + error.message, 500);
