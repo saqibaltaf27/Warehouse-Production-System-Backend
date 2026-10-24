@@ -34,7 +34,6 @@ app.use((req, res, next) => {
     if (safeBody.password) safeBody.password = "***HIDDEN***";
     console.log("Body:", safeBody);
   }
-  console.log("------------------------------------------");
   next();
 });
 app.get("/api/health", (req, res) => {

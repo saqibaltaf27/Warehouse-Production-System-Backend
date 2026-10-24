@@ -136,17 +136,10 @@ class PurchaseOrderController {
         })),
       };
 
-      console.log(
-        "Sending Purchase Request to external API:",
-        JSON.stringify(payload, null, 2),
-      );
-
       const response = await axios.post(PURCHASE_REQUEST_API, payload, {
         headers: { "Content-Type": "application/json" },
         timeout: 30000,
       });
-
-      console.log("External API response:", response.status, response.data);
 
       const data = response.data;
       const isExternalSuccess = response.status === 200 && (data?.Success !== false && data?.success !== false);

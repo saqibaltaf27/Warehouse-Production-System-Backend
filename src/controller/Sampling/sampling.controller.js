@@ -153,7 +153,7 @@ exports.getOpenDocuments = async (req, res) => {
     const dataQuery = `
       SELECT ${selectCols}
       ${baseQuery}
-      ORDER BY T.DocNum DESC
+      ORDER BY T.DocDate DESC, T.DocNum DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
     `;
     const dataResult = await request.query(dataQuery);

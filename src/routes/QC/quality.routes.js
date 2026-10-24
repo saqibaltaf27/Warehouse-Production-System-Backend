@@ -1,8 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const qualityController = require('../../controller/QC/quality.controller');
-console.log("qualityController exports:", qualityController);
-
 router.get('/quality-records', qualityController.getQualityRecords);
 router.get('/quality-decisions', qualityController.getQualityDecisions);
 router.get('/quality-record/:docEntry', qualityController.getQualityRecordDetails);
