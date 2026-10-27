@@ -17,7 +17,7 @@ router.get('/order-summary', authenticateToken, dashboardController.getOrderSumm
 router.get('/warehouses', authenticateToken, dashboardController.getWarehouses);
 router.get('/order-status-summary', authenticateToken, dashboardController.getOrderStatusSummary);
 router.get('/monthly-production-achievement', authenticateToken, dashboardController.getMonthlyProductionAchievement);
-router.get('/monthly-sample-status', authenticateToken, dashboardController.getMonthlySampleStatus);
+router.get('/open-production-orders', authenticateToken, dashboardController.getOpenProductionOrders);
 router.get('/monthly-production-analytics', authenticateToken, dashboardController.getMonthlyProductionAnalytics);
 router.get('/qc-overview', authenticateToken, dashboardController.getQcOverview);
 router.get('/top-products-cost-trend', authenticateToken, dashboardController.getTopProductsCostTrend);

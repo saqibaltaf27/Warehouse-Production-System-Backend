@@ -20,6 +20,7 @@ const machineRoutes = require("./routes/Machine/machine.route");
 const purchaseOrderRoutes = require("./routes/PurchaseOrder/PurchaseOrder.route");
 const staffRoutes = require("./routes/Staff/staff.route");
 const samplingRoutes = require("./routes/Sampling/sampling.routes");
+const ticketRoutes = require("./routes/Tickets/tickets.route");
 const app = express();
 
 applySecurityAndMiddlewares(app);
@@ -63,6 +64,7 @@ app.use("/api/machine", machineRoutes);
 app.use("/api/purchase-order", purchaseOrderRoutes);
 app.use("/api/staff", staffRoutes);
 app.use("/api/sampling", samplingRoutes);
+app.use("/api/tickets", ticketRoutes);
 app.use("/api/coa-template", coaTemplateRoutes);
 app.use("/api/quality", qualityRoutes);
 app.use(errorHandler);

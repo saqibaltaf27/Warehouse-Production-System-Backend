@@ -1047,135 +1047,119 @@ exports.getMonthlyProductionAchievement = async (req, res) => {
   }
 };
 
-exports.getMonthlySampleStatus = async (req, res) => {
+exports.getOpenProductionOrders = async (req, res) => {
   try {
-    const month = Number(req.query.month);
-    const year = Number(req.query.year);
-    if (!req.query.startDate && (!month || !year || month < 1 || month > 12)) {
-      return res.status(400).json({ success: false, message: "month and year are required" });
-    }
-
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 10));
-    const search = String(req.query.search || "").trim();
+    const search = String(req.query.search || '').trim();
     const offset = (page - 1) * limit;
-
     const pool = await poolPromise;
     const result = await pool.request()
-      .input("month", sql.Int, month || 1)
-      .input("year", sql.Int, year || 2000)
-      .input("rangeStart", sql.Date, req.query.startDate || null)
-      .input("rangeEnd", sql.Date, req.query.endDate || null)
-      .input("offset", sql.Int, offset)
-      .input("limit", sql.Int, limit)
-      .input("search", sql.NVarChar, search)
+      .input('offset', sql.Int, offset)
+      .input('limit', sql.Int, limit)
+      .input('search', sql.NVarChar, search)
       .query(`
-        DECLARE @start DATE = CASE WHEN @rangeStart IS NOT NULL THEN @rangeStart ELSE DATEFROMPARTS(@year, @month, 1) END;
-        DECLARE @end DATE = CASE WHEN @rangeEnd IS NOT NULL THEN DATEADD(DAY, 1, @rangeEnd) ELSE DATEADD(MONTH, 1, @start) END;
-
-        SELECT b.U_status AS StatusCode, COUNT(*) AS LineCount
-        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
-        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
-        WHERE a.U_SmpDate >= @start AND a.U_SmpDate < @end
-          AND b.U_status IN ('S', 'UI', 'A', 'R', 'P', 'CA', 'CR', 'C')
-        GROUP BY b.U_status;
+        SET NOCOUNT ON;
+        SELECT
+          T0.DocNum AS ProductionOrderNo,
+          T0.ItemCode,
+          T1.ItemName,
+          T0.PlannedQty,
+          T0.CmpltQty AS CompletedQty,
+          (T0.PlannedQty - T0.CmpltQty) AS RemainingQty,
+          T0.StartDate,
+          T0.DueDate,
+          CASE
+            WHEN T0.Status = 'P' THEN 'Planned'
+            WHEN T0.Status = 'R' THEN 'Released'
+          END AS ProductionStatus,
+          CASE
+            WHEN T0.CmpltQty >= T0.PlannedQty THEN 'Quantity Completed - Still Open'
+            WHEN T0.CmpltQty > 0 THEN 'Partially Completed'
+            WHEN T0.Status = 'P' THEN 'Planned - Not Started'
+            ELSE 'Released - Not Yet Completed'
+          END AS WorkStatus,
+          DATEDIFF(DAY, CAST(GETDATE() AS DATE), T0.DueDate) AS DaysRemaining,
+          CASE
+            WHEN T0.DueDate < CAST(GETDATE() AS DATE) THEN 'Overdue'
+            WHEN T0.DueDate = CAST(GETDATE() AS DATE) THEN 'Due Today'
+            WHEN T0.DueDate <= DATEADD(DAY, 7, CAST(GETDATE() AS DATE)) THEN 'Due Within 7 Days'
+            ELSE 'On Schedule'
+          END AS DueStatus
+        INTO #OpenOrders
+        FROM LDS_LIVE.dbo.OWOR T0 WITH (NOLOCK)
+        LEFT JOIN LDS_LIVE.dbo.OITM T1 WITH (NOLOCK) ON T0.ItemCode = T1.ItemCode
+        WHERE T0.Status IN ('P', 'R');
 
         SELECT
-          a.DocNum AS SamplingNo,
-          a.U_SmpDate AS SamplingDate,
-          b.U_ItemCode AS ItemCode,
-          b.U_ItemName AS ItemName,
-          b.U_Batch AS Batch,
-          b.U_SmpQty AS SampleQty,
-          CASE b.U_status
-            WHEN 'S' THEN 'Sampled'
-            WHEN 'UI' THEN 'Under Inspection'
-            WHEN 'A' THEN 'Accepted'
-            WHEN 'R' THEN 'Rejected'
-            WHEN 'P' THEN 'Pending'
-            WHEN 'CA' THEN 'Conditionally Accepted'
-            WHEN 'CR' THEN 'Conditionally Rejected'
-            WHEN 'C' THEN 'Cancel'
-          END AS StatusName,
-          CASE a.U_Type
-            WHEN 20 THEN 'Goods Receipt PO'
-            WHEN 59 THEN 'Receipt From Production'
-            WHEN 16 THEN 'Sales Return'
-            WHEN 14 THEN 'A/R Credit Memo'
-            ELSE CAST(a.U_Type AS NVARCHAR(20))
-          END AS DocumentType,
-          a.U_DocNum AS DocumentNo,
-          a.U_CardName AS SupplierName
-        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
-        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
-        WHERE a.U_SmpDate >= @start AND a.U_SmpDate < @end
-          AND b.U_status IN ('S', 'UI', 'A', 'R', 'P', 'CA', 'CR', 'C')
-          AND (
-            @search = ''
-            OR CAST(a.DocNum AS NVARCHAR(50)) LIKE '%' + @search + '%'
-            OR b.U_ItemCode LIKE '%' + @search + '%'
-            OR b.U_ItemName LIKE '%' + @search + '%'
-            OR b.U_Batch LIKE '%' + @search + '%'
-            OR a.U_DocNum LIKE '%' + @search + '%'
-            OR a.U_CardName LIKE '%' + @search + '%'
-          )
-        ORDER BY a.U_SmpDate, a.DocNum
+          COUNT(*) AS Total,
+          SUM(CASE WHEN ProductionStatus = 'Planned' THEN 1 ELSE 0 END) AS Planned,
+          SUM(CASE WHEN ProductionStatus = 'Released' THEN 1 ELSE 0 END) AS Released,
+          SUM(CASE WHEN DueStatus = 'Overdue' THEN 1 ELSE 0 END) AS Overdue,
+          SUM(ISNULL(PlannedQty, 0)) AS PlannedQty,
+          SUM(ISNULL(CompletedQty, 0)) AS CompletedQty,
+          SUM(ISNULL(RemainingQty, 0)) AS RemainingQty,
+          MIN(CASE WHEN DueDate >= CAST(GETDATE() AS DATE) THEN DueDate END) AS NextDueDate,
+          (
+            SELECT TOP 1 DueStatus
+            FROM #OpenOrders
+            WHERE DueDate >= CAST(GETDATE() AS DATE)
+            ORDER BY DueDate ASC, ProductionOrderNo DESC
+          ) AS NextDueStatus
+        FROM #OpenOrders;
+
+        SELECT *
+        FROM #OpenOrders
+        WHERE (
+          @search = ''
+          OR CAST(ProductionOrderNo AS NVARCHAR(50)) LIKE '%' + @search + '%'
+          OR ItemCode LIKE '%' + @search + '%'
+          OR ItemName LIKE '%' + @search + '%'
+          OR ProductionStatus LIKE '%' + @search + '%'
+          OR WorkStatus LIKE '%' + @search + '%'
+          OR DueStatus LIKE '%' + @search + '%'
+        )
+        ORDER BY DueDate ASC, ProductionOrderNo DESC
         OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;
 
         SELECT COUNT(*) AS Total
-        FROM DOME.dbo.[@XD_OSMP] a WITH (NOLOCK)
-        INNER JOIN DOME.dbo.[@XD_SMP1] b WITH (NOLOCK) ON a.DocEntry = b.DocEntry
-        WHERE a.U_SmpDate >= @start AND a.U_SmpDate < @end
-          AND b.U_status IN ('S', 'UI', 'A', 'R', 'P', 'CA', 'CR', 'C')
-          AND (
-            @search = ''
-            OR CAST(a.DocNum AS NVARCHAR(50)) LIKE '%' + @search + '%'
-            OR b.U_ItemCode LIKE '%' + @search + '%'
-            OR b.U_ItemName LIKE '%' + @search + '%'
-            OR b.U_Batch LIKE '%' + @search + '%'
-            OR a.U_DocNum LIKE '%' + @search + '%'
-            OR a.U_CardName LIKE '%' + @search + '%'
-          );
+        FROM #OpenOrders
+        WHERE (
+          @search = ''
+          OR CAST(ProductionOrderNo AS NVARCHAR(50)) LIKE '%' + @search + '%'
+          OR ItemCode LIKE '%' + @search + '%'
+          OR ItemName LIKE '%' + @search + '%'
+          OR ProductionStatus LIKE '%' + @search + '%'
+          OR WorkStatus LIKE '%' + @search + '%'
+          OR DueStatus LIKE '%' + @search + '%'
+        );
       `);
 
-    const labels = {
-      S: "Sampled",
-      UI: "Under Inspection",
-      A: "Accepted",
-      R: "Rejected",
-      P: "Pending",
-      CA: "Conditionally Accepted",
-      CR: "Conditionally Rejected",
-      C: "Cancel",
-    };
-    const counts = Object.fromEntries(Object.keys(labels).map((code) => [code, 0]));
-    (result.recordsets?.[0] || []).forEach((row) => {
-      const code = row.StatusCode || "";
-      if (Object.prototype.hasOwnProperty.call(counts, code)) {
-        counts[code] = Number(row.LineCount) || 0;
-      }
-    });
-    counts.S = Object.values(counts).reduce((sum, value) => sum + value, 0);
-    const samples = (result.recordsets?.[1] || []).map((row) => ({
+    const summary = result.recordsets?.[0]?.[0] || {};
+    const orders = (result.recordsets?.[1] || []).map((row) => ({
       ...row,
-      SamplingDate: formatDate(row.SamplingDate),
+      StartDate: formatDate(row.StartDate),
+      DueDate: formatDate(row.DueDate),
     }));
-    const total = Number(result.recordsets?.[2]?.[0]?.Total) || 0;
-
+    const filteredTotal = Number(result.recordsets?.[2]?.[0]?.Total) || 0;
     res.status(200).json({
       success: true,
       data: {
-        cards: Object.entries(labels).map(([code, label]) => ({
-          code,
-          label,
-          count: counts[code],
-        })),
-        samples,
+        total: Number(summary.Total) || 0,
+        planned: Number(summary.Planned) || 0,
+        released: Number(summary.Released) || 0,
+        overdue: Number(summary.Overdue) || 0,
+        plannedQty: Number(summary.PlannedQty) || 0,
+        completedQty: Number(summary.CompletedQty) || 0,
+        remainingQty: Number(summary.RemainingQty) || 0,
+        nextDueDate: formatDate(summary.NextDueDate),
+        nextDueStatus: summary.NextDueStatus || '',
+        orders,
       },
-      pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 },
+      pagination: { total: filteredTotal, page, limit, pages: Math.ceil(filteredTotal / limit) || 1 },
     });
   } catch (error) {
-    console.error("Error in getMonthlySampleStatus:", error);
+    console.error('Error in getOpenProductionOrders:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
