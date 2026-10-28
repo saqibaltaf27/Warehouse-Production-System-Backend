@@ -1,4 +1,4 @@
-const { sql, poolPromise } = require('../../database/connection');
+﻿const { sql, poolPromise } = require('../../database/connection');
 
 exports.getQCRmList = async (req, res) => {
   try {
@@ -136,13 +136,25 @@ exports.getOpenDocuments = async (req, res) => {
             )
           )
       )`;
+
+    const isGoodsReceipt = docType === 'Goods Receipt PO';
+    const qcItemCondition = isGoodsReceipt ? `
+      AND EXISTS (
+        SELECT 1
+        FROM LDS_LIVE.dbo.${lineTable} L
+        INNER JOIN LDS_LIVE.dbo.OITM B ON B.ItemCode = L.ItemCode
+        WHERE L.DocEntry = T.DocEntry
+          AND ISNULL(B.U_QCItem, '') = 'Y'
+      )` : '';
     
-    const baseQuery = `FROM LDS_LIVE.dbo.${tableName} T WHERE T.DocStatus = 'O' AND T.CANCELED = 'N' ${notSampledCondition} ${searchCondition}`;
+    const baseQuery = `FROM LDS_LIVE.dbo.${tableName} T WHERE T.DocStatus = 'O' AND T.CANCELED = 'N' ${qcItemCondition} ${notSampledCondition} ${searchCondition}`;
     
     const countResult = await request.query(`SELECT COUNT(*) as total ${baseQuery}`);
     const total = countResult.recordset[0].total;
     
-    const itemCountSql = `(SELECT COUNT(DISTINCT L.ItemCode) FROM LDS_LIVE.dbo.${lineTable} L WHERE L.DocEntry = T.DocEntry) AS ItemCount`;
+    const itemCountSql = isGoodsReceipt
+      ? `(SELECT COUNT(DISTINCT L.ItemCode) FROM LDS_LIVE.dbo.${lineTable} L INNER JOIN LDS_LIVE.dbo.OITM B ON B.ItemCode = L.ItemCode WHERE L.DocEntry = T.DocEntry AND ISNULL(B.U_QCItem, '') = 'Y') AS ItemCount`
+      : `(SELECT COUNT(DISTINCT L.ItemCode) FROM LDS_LIVE.dbo.${lineTable} L WHERE L.DocEntry = T.DocEntry) AS ItemCount`;
     const selectCols = hasSupplier 
       ? `T.DocEntry, T.DocNum, T.CardCode, T.CardName, T.DocDate, ${itemCountSql}` 
       : `T.DocEntry, T.DocNum, 
@@ -266,7 +278,9 @@ exports.getDocumentDetails = async (req, res) => {
          END
       ) AND ST.BaseEntry = T1.DocEntry AND ST.BaseLinNum = T1.LineNum AND ST.ItemCode = T1.ItemCode
       LEFT JOIN LDS_LIVE.dbo.OSRI SR ON SR.ItemCode = ST.ItemCode AND SR.SysSerial = ST.SysSerial AND SR.WhsCode = T1.WhsCode
-      WHERE T1.DocEntry = @docEntry ${baseTypeCondition}
+      WHERE T1.DocEntry = @docEntry
+        ${headerTable === 'OPDN' ? "AND ISNULL(B.U_QCItem, '') = 'Y'" : ''}
+        ${baseTypeCondition}
     `;
     
     const linesResult = await request.query(linesQuery);
@@ -640,3 +654,154 @@ exports.getFilteredSamples = async (req, res) => {
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 };
+
+const SAMPLE_STATUS_LABELS = {
+  S: 'Sampled',
+  UI: 'Under Inspection',
+  P: 'Pending',
+  A: 'Accepted',
+  R: 'Rejected',
+  CA: 'Conditionally Accepted',
+  CR: 'Conditionally Rejected',
+  C: 'Cancelled',
+};
+
+const labelSampleStatus = (code) => {
+  if (!code) return null;
+  return SAMPLE_STATUS_LABELS[code] || code;
+};
+
+const inspectionStatusFrom = (sampleCode, qcDecision) => {
+  const decision = qcDecision || sampleCode;
+  if (!sampleCode && !qcDecision) return 'Not started';
+  if (['A', 'CA', 'R', 'CR'].includes(decision)) return 'Completed';
+  if (decision === 'UI' || sampleCode === 'UI') return 'Under inspection';
+  if (['S', 'P'].includes(sampleCode)) return 'Sampling';
+  return labelSampleStatus(sampleCode) || 'Pending';
+};
+
+const dispositionFrom = (sampleCode, qcDecision) => {
+  const decision = qcDecision || sampleCode;
+  if (!sampleCode && !qcDecision) return 'Not started';
+  if (['A', 'CA'].includes(decision)) return 'Released';
+  if (['R', 'CR'].includes(decision)) return 'Rejected';
+  if (decision === 'UI') return 'Under inspection';
+  return 'Pending';
+};
+
+exports.getPostedGrns = async (req, res) => {
+  try {
+    const rawDate = String(req.query.date || '').trim();
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+      ? rawDate
+      : new Date().toISOString().slice(0, 10);
+    const pool = await poolPromise;
+    const request = pool.request().input('DocDate', sql.Date, date);
+    const result = await request.query(`
+        SELECT
+          T.DocEntry,
+          T.DocNum AS GrnNo,
+          T.CardCode AS SupplierCode,
+          T.CardName AS SupplierName,
+          CONVERT(varchar(10), T.DocDate, 23) AS GrnDate,
+          L.LineNum,
+          L.ItemCode,
+          L.Dscription AS ItemName,
+          S.SamplingNo,
+          SL.U_status AS SampleStatusCode,
+          Q.U_QCDecision AS QcDecision,
+          1 AS PostedToday
+        FROM LDS_LIVE.dbo.OPDN T WITH (NOLOCK)
+        INNER JOIN LDS_LIVE.dbo.PDN1 L WITH (NOLOCK) ON L.DocEntry = T.DocEntry
+        INNER JOIN LDS_LIVE.dbo.OITM I WITH (NOLOCK) ON I.ItemCode = L.ItemCode
+        OUTER APPLY (
+          SELECT TOP 1 S.DocEntry AS SampleDocEntry, S.DocNum AS SamplingNo
+          FROM DOME.dbo.[@XD_OSMP] S WITH (NOLOCK)
+          WHERE S.U_Type = 20
+            AND TRY_CAST(S.U_DocEntry AS INT) = T.DocEntry
+            AND EXISTS (
+              SELECT 1
+              FROM DOME.dbo.[@XD_SMP1] X WITH (NOLOCK)
+              WHERE X.DocEntry = S.DocEntry
+                AND ISNULL(X.U_status COLLATE DATABASE_DEFAULT, '') <> 'C'
+            )
+          ORDER BY S.DocNum DESC
+        ) S
+        OUTER APPLY (
+          SELECT TOP 1 X.U_status
+          FROM DOME.dbo.[@XD_SMP1] X WITH (NOLOCK)
+          WHERE X.DocEntry = S.SampleDocEntry
+            AND ISNULL(X.U_status COLLATE DATABASE_DEFAULT, '') <> 'C'
+            AND (
+              X.U_BaseLine = L.LineNum
+              OR X.U_ItemCode COLLATE DATABASE_DEFAULT = L.ItemCode COLLATE DATABASE_DEFAULT
+            )
+          ORDER BY CASE WHEN X.U_BaseLine = L.LineNum THEN 0 ELSE 1 END, X.LineId
+        ) SL
+        OUTER APPLY (
+          SELECT TOP 1 Q.U_QCDecision
+          FROM DOME.dbo.[@XD_OQUL] Q WITH (NOLOCK)
+          WHERE S.SamplingNo IS NOT NULL
+            AND Q.U_SampleNumber = S.SamplingNo
+            AND (
+              Q.U_Line = L.LineNum
+              OR Q.U_ItemCode COLLATE DATABASE_DEFAULT = L.ItemCode COLLATE DATABASE_DEFAULT
+            )
+          ORDER BY Q.DocEntry DESC
+        ) Q
+        WHERE T.CANCELED = 'N'
+          AND CAST(T.DocDate AS date) = @DocDate
+          AND ISNULL(I.U_QCItem, '') = 'Y';
+      `);
+
+    const postedRows = result.recordset || [];
+    const rows = postedRows.map((row) => {
+      const sampleCode = row.SampleStatusCode || null;
+      const qcDecision = row.QcDecision || null;
+      const sampled = sampleCode ? 1 : 0;
+      const underInspection = sampleCode === 'UI' || qcDecision === 'UI' ? 1 : 0;
+      const disposition = dispositionFrom(sampleCode, qcDecision);
+      return {
+        DocEntry: row.DocEntry,
+        GrnNo: row.GrnNo,
+        SupplierCode: row.SupplierCode,
+        SupplierName: row.SupplierName,
+        GrnDate: row.GrnDate,
+        LineNum: row.LineNum,
+        ItemCode: row.ItemCode,
+        ItemName: row.ItemName,
+        SamplingNo: row.SamplingNo || null,
+        Sampled: sampled,
+        SampleStatus: labelSampleStatus(sampleCode) || (sampled ? 'Sampled' : 'Not started'),
+        InspectionStatus: inspectionStatusFrom(sampleCode, qcDecision),
+        Disposition: disposition,
+        UnderInspection: underInspection,
+      };
+    });
+
+    const posted = new Set(postedRows.map((row) => row.DocEntry)).size;
+    const postedUnsampled = new Set(
+      postedRows.filter((row) => !row.SampleStatusCode).map((row) => row.DocEntry)
+    ).size;
+    const sampledGrns = new Set(rows.filter((row) => row.Sampled === 1).map((row) => row.DocEntry || row.GrnNo));
+    const uiGrns = new Set(rows.filter((row) => row.UnderInspection === 1).map((row) => row.DocEntry || row.GrnNo));
+    const pendingDisposition = rows.filter((row) => row.Disposition === 'Pending' || row.Disposition === 'Under inspection').length;
+
+    res.json({
+      success: true,
+      data: {
+        date,
+        posted,
+        sampled: sampledGrns.size,
+        notSampled: postedUnsampled,
+        underInspection: uiGrns.size,
+        pendingDisposition,
+        rows,
+      },
+    });
+  } catch (err) {
+    console.error('Error in getPostedGrns:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+

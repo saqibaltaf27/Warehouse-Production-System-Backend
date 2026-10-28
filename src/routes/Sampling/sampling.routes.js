@@ -10,5 +10,6 @@ router.get('/saved-samples', samplingController.getSavedSamples);
 router.get('/saved-sample/:docnum', samplingController.getSavedSampleDetails);
 router.post('/save', samplingController.saveSample);
 router.get('/filtered', samplingController.getFilteredSamples);
+router.get('/posted-grns', samplingController.getPostedGrns);
 
 module.exports = router;

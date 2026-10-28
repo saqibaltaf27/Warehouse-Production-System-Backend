@@ -1,4 +1,4 @@
-const { poolPromise } = require("../../database/connection");
+const { sql, poolPromise } = require("../../database/connection");
 
 const safeInt = (val, defaultVal) => {
   const parsed = parseInt(val, 10);
@@ -672,18 +672,24 @@ const getPlannedReleasedOrders = async (req, res) => {
   }
 };
 
+const toNullableNumber = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const getTodayWorkingPlans = async (req, res) => {
   try {
     const pool = await poolPromise;
-    const date = req.query.date || new Date().toISOString().split("T")[0];
+    const rawDate = String(req.query.date || "").trim();
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+      ? rawDate
+      : new Date().toISOString().split("T")[0];
     const result = await pool.request()
-      .input("PlanDate", date)
+      .input("PlanDate", sql.Date, date)
       .query(`
-        SELECT P.Id, P.PlanDate, P.Line, P.PO, P.Shift, P.Supervisor, P.Persons,
-               O.ItemCode AS FGItemCode, O.ProdName AS ProductName
+        SELECT P.Id, P.PlanDate, P.Line, P.PO, P.Shift, P.Supervisor, P.Persons
         FROM Dome.dbo.PmsProductionPlanning P
-        LEFT JOIN LDS_LIVE.dbo.OWOR O
-          ON TRY_CAST(P.PO AS INT) = O.DocNum
         WHERE CAST(P.PlanDate AS DATE) = @PlanDate
         ORDER BY P.Line, P.PO
       `);
@@ -721,27 +727,257 @@ const getTodayWorkingPlans = async (req, res) => {
       });
     }
 
-    const data = parsed.map((plan) => ({
-      Id: plan.Id,
-      PlanDate: plan.PlanDate,
-      Line: plan.Line,
-      PO: plan.PO,
-      FGItemCode: plan.FGItemCode || "",
-      ProductName: plan.ProductName || "",
-      Shift: plan.Shift,
-      Supervisor: plan.Supervisor,
-      staff: plan.persons.map((person) => ({
-        StaffID: person.StaffID,
-        Name: staffNameById[person.StaffID] || "",
-        jd: person.jd,
-        hours: person.hours,
-      })),
-    }));
+    const productByPo = {};
+    const poNums = [...new Set(
+      parsed
+        .map((plan) => Number.parseInt(plan.PO, 10))
+        .filter((po) => Number.isInteger(po))
+    )];
+    if (poNums.length > 0) {
+      try {
+        const productResult = await pool.request().query(`
+          SELECT DocNum AS PO, ItemCode AS FGItemCode, ProdName AS ProductName
+          FROM LDS_LIVE.dbo.OWOR WITH (NOLOCK)
+          WHERE DocNum IN (${poNums.join(",")})
+        `);
+        productResult.recordset.forEach((row) => {
+          productByPo[String(row.PO)] = {
+            FGItemCode: row.FGItemCode || "",
+            ProductName: row.ProductName || "",
+          };
+        });
+      } catch (productError) {
+        console.error("Error loading PO product names:", productError);
+      }
+    }
 
-    res.json({ success: true, data });
+    const blockers = [];
+    try {
+      const blockerResult = await pool.request().query(`
+        SELECT
+          O.DocNum AS PO,
+          O.ProdName AS ProductName,
+          W.ItemCode,
+          M.ItemName,
+          ISNULL(W.PlannedQty, 0) - ISNULL(W.IssuedQty, 0) AS OutstandingQty,
+          ISNULL(I.OnHand, 0) AS OnHand,
+          (ISNULL(W.PlannedQty, 0) - ISNULL(W.IssuedQty, 0)) - ISNULL(I.OnHand, 0) AS ShortageQty
+        FROM LDS_LIVE.dbo.OWOR O WITH (NOLOCK)
+        INNER JOIN LDS_LIVE.dbo.WOR1 W WITH (NOLOCK) ON W.DocEntry = O.DocEntry
+        LEFT JOIN LDS_LIVE.dbo.OITW I WITH (NOLOCK)
+          ON I.ItemCode = W.ItemCode AND I.WhsCode = W.wareHouse
+        LEFT JOIN LDS_LIVE.dbo.OITM M WITH (NOLOCK) ON M.ItemCode = W.ItemCode
+        WHERE O.Status IN ('P', 'R')
+          AND ISNULL(W.ItemType, 4) = 4
+          AND ISNULL(W.PlannedQty, 0) - ISNULL(W.IssuedQty, 0) > ISNULL(I.OnHand, 0)
+        ORDER BY O.DocNum, ShortageQty DESC
+      `);
+      blockerResult.recordset.forEach((row) => {
+        blockers.push({
+          po: row.PO,
+          product: row.ProductName || "",
+          itemCode: row.ItemCode,
+          itemName: row.ItemName || "",
+          outstandingQty: toNullableNumber(row.OutstandingQty),
+          onHand: toNullableNumber(row.OnHand),
+          shortageQty: toNullableNumber(row.ShortageQty),
+          blocker: "Material shortage",
+        });
+      });
+    } catch (blockerError) {
+      console.error("Error in production blockers:", blockerError);
+    }
+
+    const staffPoHours = {};
+    const data = parsed.map((plan) => {
+      const poKey = plan.PO != null ? String(plan.PO) : "";
+      const staff = plan.persons.map((person) => {
+        const hours = toNullableNumber(person.hours);
+        if (!staffPoHours[person.StaffID]) {
+          staffPoHours[person.StaffID] = { hours: 0, pos: new Set() };
+        }
+        staffPoHours[person.StaffID].hours += hours || 0;
+        if (poKey) staffPoHours[person.StaffID].pos.add(poKey);
+        return {
+          StaffID: person.StaffID,
+          Name: staffNameById[person.StaffID] || "",
+          jd: person.jd,
+          hours: person.hours,
+          hoursKind: "planned",
+        };
+      });
+      return {
+        Id: plan.Id,
+        PlanDate: plan.PlanDate,
+        Line: plan.Line,
+        PO: plan.PO,
+        FGItemCode: productByPo[poKey]?.FGItemCode || "",
+        ProductName: productByPo[poKey]?.ProductName || "",
+        Shift: plan.Shift,
+        Supervisor: plan.Supervisor,
+        staff,
+      };
+    });
+
+    const workingPOs = new Set(data.map((plan) => String(plan.PO || "")).filter(Boolean));
+    const scheduledLines = new Set(data.map((plan) => plan.Line).filter(Boolean));
+    const blockedPos = new Set(blockers.map((row) => String(row.po)));
+    const overlapWarnings = Object.entries(staffPoHours)
+      .filter(([, info]) => info.pos.size > 1)
+      .map(([staffId, info]) => ({
+        StaffID: Number(staffId),
+        Name: staffNameById[Number(staffId)] || "",
+        pos: [...info.pos],
+        plannedHours: info.hours,
+      }));
+
+    res.json({
+      success: true,
+      date,
+      kpis: {
+        workingPOs: workingPOs.size,
+        scheduledLines: scheduledLines.size,
+        assignedStaff: staffIds.size,
+        assignmentRecords: data.reduce((sum, plan) => sum + plan.staff.length, 0),
+        blockedOrders: blockedPos.size,
+      },
+      overlapWarnings,
+      blockers,
+      data,
+    });
   } catch (error) {
     console.error("Error in getTodayWorkingPlans:", error);
     res.status(500).json({ success: false, message: "Failed to fetch today's working plans" });
+  }
+};
+
+const toIsoDate = (value) => {
+  if (!value) return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+};
+
+const poStatusLabel = (status) => {
+  const labels = { P: "Planned", R: "Released", L: "Closed", C: "Cancelled" };
+  return labels[status] || status || "";
+};
+
+const getMonthWorkingPos = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const rawDate = String(req.query.date || "").trim();
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+      ? rawDate
+      : new Date().toISOString().split("T")[0];
+
+    const result = await pool.request()
+      .input("PlanDate", sql.Date, date)
+      .query(`
+        DECLARE @SelectedDate DATE = @PlanDate;
+        DECLARE @StartDate DATE = DATEFROMPARTS(YEAR(@SelectedDate), MONTH(@SelectedDate), 1);
+        DECLARE @EndDate DATE = DATEADD(MONTH, 1, @StartDate);
+
+        WITH ProductionPlan AS
+        (
+            SELECT
+                W.DocEntry,
+                W.DocNum AS PO,
+                CAST(W.StartDate AS DATE) AS PlanDate,
+                W.ItemCode,
+                W.ProdName AS ItemName,
+                W.PlannedQty,
+                W.CmpltQty,
+                W.Status
+            FROM LDS_LIVE.dbo.OWOR W
+            WHERE W.StartDate >= @StartDate
+              AND W.StartDate < @EndDate
+        ),
+        ActualProduction AS
+        (
+            SELECT
+                R1.BaseEntry,
+                CAST(R0.DocDate AS DATE) AS ActualDate,
+                SUM(R1.Quantity) AS ActualQty
+            FROM LDS_LIVE.dbo.OIGN R0
+            INNER JOIN LDS_LIVE.dbo.IGN1 R1
+                ON R0.DocEntry = R1.DocEntry
+            WHERE R1.BaseType = 202
+              AND R0.CANCELED = 'N'
+              AND R0.DocDate >= @StartDate
+              AND R0.DocDate < @EndDate
+            GROUP BY
+                R1.BaseEntry,
+                CAST(R0.DocDate AS DATE)
+        )
+        SELECT
+            @StartDate AS MonthStart,
+            @EndDate AS MonthEnd,
+            P.PlanDate,
+            A.ActualDate,
+            A.BaseEntry AS GrNo,
+            P.PO,
+            P.ItemCode,
+            P.ItemName,
+            P.PlannedQty AS POPlannedQty,
+            ISNULL(A.ActualQty, 0) AS DailyActualQty,
+            P.CmpltQty AS POCompletedQty,
+            P.Status AS POStatus
+        FROM ProductionPlan P
+        LEFT JOIN ActualProduction A
+            ON P.DocEntry = A.BaseEntry
+        ORDER BY
+            P.PlanDate,
+            P.PO,
+            A.ActualDate;
+      `);
+
+    const recordset = result.recordset || [];
+    const monthStart = toIsoDate(recordset[0]?.MonthStart) || `${date.slice(0, 7)}-01`;
+    const monthEnd = toIsoDate(recordset[0]?.MonthEnd);
+    const rows = recordset.map((row) => ({
+      startDate: toIsoDate(row.PlanDate),
+      actualDate: toIsoDate(row.ActualDate),
+      grNo: row.GrNo ?? "",
+      PO: row.PO,
+      ItemCode: row.ItemCode || "",
+      ItemName: row.ItemName || "",
+      plannedQty: toNullableNumber(row.POPlannedQty),
+      postedProduction: toNullableNumber(row.DailyActualQty) || 0,
+      completedQty: toNullableNumber(row.POCompletedQty),
+      status: poStatusLabel(row.POStatus),
+      statusCode: row.POStatus || "",
+    }));
+
+    const uniquePos = new Map();
+    rows.forEach((row) => {
+      if (!uniquePos.has(String(row.PO))) uniquePos.set(String(row.PO), row);
+    });
+    const postedOnDate = rows
+      .filter((row) => row.actualDate === date)
+      .reduce((sum, row) => sum + (row.postedProduction || 0), 0);
+    const postedInMonth = rows.reduce((sum, row) => sum + (row.postedProduction || 0), 0);
+    const plannedOutput = [...uniquePos.values()].reduce((sum, row) => sum + (row.plannedQty || 0), 0);
+
+    res.json({
+      success: true,
+      date,
+      monthStart,
+      monthEnd,
+      kpis: {
+        workingPOs: uniquePos.size,
+        plannedOutput,
+        postedProduction: postedOnDate,
+        postedProductionMonth: postedInMonth,
+      },
+      data: rows,
+    });
+  } catch (error) {
+    console.error("Error in getMonthWorkingPos:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch month working POs" });
   }
 };
 
@@ -759,6 +995,7 @@ module.exports = {
   createMachineEfficiency,
   getMachineEfficiency,
   getPlannedReleasedOrders,
-  getTodayWorkingPlans
+  getTodayWorkingPlans,
+  getMonthWorkingPos
 };
 
