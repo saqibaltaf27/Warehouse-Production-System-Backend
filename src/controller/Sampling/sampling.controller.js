@@ -209,15 +209,39 @@ exports.getDocumentDetails = async (req, res) => {
       default: return res.status(400).json({ success: false, message: 'Invalid docType' });
     }
     
+    const sapBaseType = { OPDN: 20, OIGN: 59, ORDN: 16, ORIN: 14 }[headerTable];
     const pool = await poolPromise;
     const request = pool.request();
     request.input('docEntry', sql.Int, docEntry);
+    request.input('baseType', sql.Int, sapBaseType);
+
+    const qcFilter = headerTable === 'OPDN' ? "AND ISNULL(B.U_QCItem, '') = 'Y'" : '';
+    const preview = String(req.query.preview || '') === '1';
+
+    if (preview) {
+      const previewResult = await request.query(`
+        SELECT
+          T1.LineNum AS BaseLine,
+          T1.ItemCode,
+          T1.Dscription AS ItemName,
+          T1.Quantity AS ActualQty
+        FROM LDS_LIVE.dbo.${lineTable} T1 WITH (NOLOCK)
+        INNER JOIN LDS_LIVE.dbo.OITM B WITH (NOLOCK) ON B.ItemCode = T1.ItemCode
+        WHERE T1.DocEntry = @docEntry
+          ${qcFilter}
+          ${baseTypeCondition}
+      `);
+      return res.json({
+        success: true,
+        data: { header: null, lines: previewResult.recordset || [] },
+      });
+    }
     
     const selectSupplier = hasSupplier ? 'T0.CardCode, T0.CardName' : 'NULL AS CardCode, NULL AS CardName';
     
     const headerResult = await request.query(`
       SELECT T0.DocEntry, T0.DocNum, ${selectSupplier}, T0.DocDate 
-      FROM LDS_LIVE.dbo.${headerTable} T0 
+      FROM LDS_LIVE.dbo.${headerTable} T0 WITH (NOLOCK)
       WHERE T0.DocEntry = @docEntry
     `);
     
@@ -242,44 +266,45 @@ exports.getDocumentDetails = async (req, res) => {
             ELSE 'Non Batch/Serial'
         END AS ManagedBy,
         COALESCE(BT.BatchNum, SR.IntrSerial) AS BatchSerial,
-        COALESCE(OIBT.ExpDate, SR.ExpDate) AS ExpiryDate,
+        COALESCE(BT.ExpDate, SR.ExpDate) AS ExpiryDate,
         NULL AS ManufactureDate,
         CASE
             WHEN B.ManBtchNum = 'Y' THEN BT.Quantity
             WHEN B.ManSerNum  = 'Y' THEN 1
             ELSE T1.Quantity
         END AS BatchSerialQty,
-        COALESCE(OIBT.SuppSerial, SR.SuppSerial) AS SupplierBatchSerial
-      FROM LDS_LIVE.dbo.${lineTable} T1
-      INNER JOIN LDS_LIVE.dbo.OITM B ON B.ItemCode = T1.ItemCode
-      LEFT JOIN (
-          SELECT BaseType, BaseEntry, BaseLinNum, ItemCode, BatchNum, SUM(Quantity) AS Quantity
-          FROM LDS_LIVE.dbo.IBT1
-          GROUP BY BaseType, BaseEntry, BaseLinNum, ItemCode, BatchNum
-      ) BT ON BT.BaseType = (
-         CASE 
-           WHEN '${headerTable}' = 'OPDN' THEN 20 
-           WHEN '${headerTable}' = 'OIGN' THEN 59
-           WHEN '${headerTable}' = 'ORDN' THEN 16
-           WHEN '${headerTable}' = 'ORIN' THEN 14
-         END
-      ) AND BT.BaseEntry = T1.DocEntry AND BT.BaseLinNum = T1.LineNum AND BT.ItemCode = T1.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OIBT OIBT ON OIBT.ItemCode = BT.ItemCode AND OIBT.BatchNum = BT.BatchNum AND OIBT.WhsCode = T1.WhsCode
-      LEFT JOIN (
-          SELECT BaseType, BaseEntry, BaseLinNum, ItemCode, SysSerial
-          FROM LDS_LIVE.dbo.SRI1
-          GROUP BY BaseType, BaseEntry, BaseLinNum, ItemCode, SysSerial
-      ) ST ON ST.BaseType = (
-         CASE 
-           WHEN '${headerTable}' = 'OPDN' THEN 20 
-           WHEN '${headerTable}' = 'OIGN' THEN 59
-           WHEN '${headerTable}' = 'ORDN' THEN 16
-           WHEN '${headerTable}' = 'ORIN' THEN 14
-         END
-      ) AND ST.BaseEntry = T1.DocEntry AND ST.BaseLinNum = T1.LineNum AND ST.ItemCode = T1.ItemCode
-      LEFT JOIN LDS_LIVE.dbo.OSRI SR ON SR.ItemCode = ST.ItemCode AND SR.SysSerial = ST.SysSerial AND SR.WhsCode = T1.WhsCode
+        COALESCE(BT.SuppSerial, SR.SuppSerial) AS SupplierBatchSerial
+      FROM LDS_LIVE.dbo.${lineTable} T1 WITH (NOLOCK)
+      INNER JOIN LDS_LIVE.dbo.OITM B WITH (NOLOCK) ON B.ItemCode = T1.ItemCode
+      OUTER APPLY (
+          SELECT TOP 1
+            X.BatchNum,
+            X.Quantity,
+            O.ExpDate,
+            O.SuppSerial
+          FROM LDS_LIVE.dbo.IBT1 X WITH (NOLOCK)
+          LEFT JOIN LDS_LIVE.dbo.OIBT O WITH (NOLOCK)
+            ON O.ItemCode = X.ItemCode AND O.BatchNum = X.BatchNum AND O.WhsCode = T1.WhsCode
+          WHERE X.BaseType = @baseType
+            AND X.BaseEntry = @docEntry
+            AND X.BaseLinNum = T1.LineNum
+            AND X.ItemCode = T1.ItemCode
+        ) BT
+      OUTER APPLY (
+          SELECT TOP 1
+            R.IntrSerial,
+            R.ExpDate,
+            R.SuppSerial
+          FROM LDS_LIVE.dbo.SRI1 S WITH (NOLOCK)
+          INNER JOIN LDS_LIVE.dbo.OSRI R WITH (NOLOCK)
+            ON R.ItemCode = S.ItemCode AND R.SysSerial = S.SysSerial AND R.WhsCode = T1.WhsCode
+          WHERE S.BaseType = @baseType
+            AND S.BaseEntry = @docEntry
+            AND S.BaseLinNum = T1.LineNum
+            AND S.ItemCode = T1.ItemCode
+        ) SR
       WHERE T1.DocEntry = @docEntry
-        ${headerTable === 'OPDN' ? "AND ISNULL(B.U_QCItem, '') = 'Y'" : ''}
+        ${qcFilter}
         ${baseTypeCondition}
     `;
     
@@ -691,13 +716,8 @@ const dispositionFrom = (sampleCode, qcDecision) => {
 
 exports.getPostedGrns = async (req, res) => {
   try {
-    const rawDate = String(req.query.date || '').trim();
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
-      ? rawDate
-      : new Date().toISOString().slice(0, 10);
     const pool = await poolPromise;
-    const request = pool.request().input('DocDate', sql.Date, date);
-    const result = await request.query(`
+    const result = await pool.request().query(`
         SELECT
           T.DocEntry,
           T.DocNum AS GrnNo,
@@ -750,15 +770,16 @@ exports.getPostedGrns = async (req, res) => {
           ORDER BY Q.DocEntry DESC
         ) Q
         WHERE T.CANCELED = 'N'
-          AND CAST(T.DocDate AS date) = @DocDate
-          AND ISNULL(I.U_QCItem, '') = 'Y';
+          AND T.DocStatus = 'O'
+          AND ISNULL(I.U_QCItem, '') = 'Y'
+        ORDER BY T.DocDate DESC, T.DocNum DESC, L.LineNum;
       `);
 
     const postedRows = result.recordset || [];
     const rows = postedRows.map((row) => {
       const sampleCode = row.SampleStatusCode || null;
       const qcDecision = row.QcDecision || null;
-      const sampled = sampleCode ? 1 : 0;
+      const sampled = sampleCode || row.SamplingNo ? 1 : 0;
       const underInspection = sampleCode === 'UI' || qcDecision === 'UI' ? 1 : 0;
       const disposition = dispositionFrom(sampleCode, qcDecision);
       return {
@@ -772,7 +793,7 @@ exports.getPostedGrns = async (req, res) => {
         ItemName: row.ItemName,
         SamplingNo: row.SamplingNo || null,
         Sampled: sampled,
-        SampleStatus: labelSampleStatus(sampleCode) || (sampled ? 'Sampled' : 'Not started'),
+        SampleStatus: labelSampleStatus(sampleCode) || (sampled ? 'Sampled' : 'Not sampled'),
         InspectionStatus: inspectionStatusFrom(sampleCode, qcDecision),
         Disposition: disposition,
         UnderInspection: underInspection,
@@ -781,22 +802,36 @@ exports.getPostedGrns = async (req, res) => {
 
     const posted = new Set(postedRows.map((row) => row.DocEntry)).size;
     const postedUnsampled = new Set(
-      postedRows.filter((row) => !row.SampleStatusCode).map((row) => row.DocEntry)
+      postedRows.filter((row) => !row.SampleStatusCode && !row.SamplingNo).map((row) => row.DocEntry)
     ).size;
     const sampledGrns = new Set(rows.filter((row) => row.Sampled === 1).map((row) => row.DocEntry || row.GrnNo));
     const uiGrns = new Set(rows.filter((row) => row.UnderInspection === 1).map((row) => row.DocEntry || row.GrnNo));
-    const pendingDisposition = rows.filter((row) => row.Disposition === 'Pending' || row.Disposition === 'Under inspection').length;
+    const pendingDisposition = new Set(
+      rows
+        .filter((row) => row.Disposition === "Pending" || row.Disposition === "Under inspection")
+        .map((row) => row.DocEntry || row.GrnNo)
+    ).size;
+    const openRows = rows.filter((row) => row.Sampled !== 1);
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(10, Number(req.query.limit) || 20));
+    const total = openRows.length;
+    const offset = (page - 1) * limit;
 
     res.json({
       success: true,
       data: {
-        date,
         posted,
         sampled: sampledGrns.size,
         notSampled: postedUnsampled,
         underInspection: uiGrns.size,
         pendingDisposition,
-        rows,
+        rows: openRows.slice(offset, offset + limit),
+      },
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit) || 1),
       },
     });
   } catch (err) {

@@ -5,16 +5,47 @@ const router = express.Router();
 
 const TICKET_TYPES = ['Quality', 'Production', 'Engineering'];
 const TICKET_STATUSES = ['Pending', 'In Process', 'Closed'];
+const TICKETS_TABLE = 'Dome.dbo.TicketRequests';
 
 const parseRemarks = (value) => {
   if (!value) return [];
   try {
     const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item, index) => {
+      const author = String(item.author || item.name || '').trim();
+      const empFromAuthor = author.includes(' - ') ? author.split(' - ')[0] : '';
+      return {
+        RemarkId: index + 1,
+        Remark: item.comment || item.remark || '',
+        CreatedAt: item.date || item.createdAt || null,
+        EmpId: item.empId || empFromAuthor || null,
+        FirstName: author.includes(' - ') ? author.split(' - ').slice(1).join(' - ') : (item.name || author || ''),
+        _raw: item,
+      };
+    });
   } catch {
     return [];
   }
 };
+
+const toStorageRemarks = (remarks) =>
+  remarks.map((item) => {
+    if (item._raw?.author != null || item._raw?.comment != null) {
+      return {
+        author: item._raw.author,
+        date: item._raw.date,
+        comment: item._raw.comment,
+      };
+    }
+    const name = String(item.FirstName || item.name || '').trim();
+    const empId = item.EmpId || item.empId || '';
+    return {
+      author: name ? `${empId} - ${name}` : String(empId || ''),
+      date: item.CreatedAt || item.createdAt || new Date().toISOString(),
+      comment: item.Remark || item.remark || '',
+    };
+  });
 
 const listTickets = async (req, res) => {
   try {
@@ -46,13 +77,13 @@ const listTickets = async (req, res) => {
     const result = await request.query(`
       WITH scoped AS (
         SELECT
-          t.TicketId,
+          t.Ticketid AS TicketId,
           t.EmpId,
           e.FirstName,
           t.TicketType,
           CASE
-            WHEN REPLACE(LOWER(t.Status), ' ', '') IN ('inprocess', 'inprogress') THEN 'In Process'
-            WHEN LOWER(t.Status) = 'closed' THEN 'Closed'
+            WHEN REPLACE(LOWER(ISNULL(t.Status, '')), ' ', '') IN ('inprocess', 'inprogress') THEN 'In Process'
+            WHEN LOWER(ISNULL(t.Status, '')) = 'closed' THEN 'Closed'
             ELSE 'Pending'
           END AS Status,
           t.TicketDescription,
@@ -60,14 +91,17 @@ const listTickets = async (req, res) => {
           a.FirstName AS AssignedName,
           CONVERT(varchar(19), t.CreatedAt, 120) AS CreatedAt,
           CONVERT(varchar(19), t.UpdateDate, 120) AS UpdateDate
-        FROM Dome.dbo.PMSTickets t
+        FROM ${TICKETS_TABLE} t
         LEFT JOIN HCM_GMS.dbo.MstEmployee e ON e.EmpID = t.EmpId
         LEFT JOIN HCM_GMS.dbo.MstEmployee a ON a.EmpID = TRY_CAST(t.AssignedTo AS INT)
         WHERE (@EmpId = 0 OR t.EmpId = @EmpId)
-          AND (@TicketType = '' OR t.TicketType = @TicketType)
+          AND (
+            (@TicketType = '' AND t.TicketType IN ('Quality', 'Production', 'Engineering'))
+            OR t.TicketType = @TicketType
+          )
           AND (
             @Search = ''
-            OR CAST(t.TicketId AS nvarchar(20)) LIKE '%' + @Search + '%'
+            OR CAST(t.Ticketid AS nvarchar(20)) LIKE '%' + @Search + '%'
             OR t.TicketDescription LIKE '%' + @Search + '%'
             OR e.FirstName LIKE '%' + @Search + '%'
           )
@@ -115,8 +149,8 @@ const createTicket = async (req, res) => {
     try {
       const idRequest = new sql.Request(transaction);
       const idResult = await idRequest.query(`
-        SELECT ISNULL(MAX(TicketId), 0) + 1 AS NextId
-        FROM Dome.dbo.PMSTickets WITH (UPDLOCK, HOLDLOCK)
+        SELECT ISNULL(MAX(Ticketid), 0) + 1 AS NextId
+        FROM ${TICKETS_TABLE} WITH (UPDLOCK, HOLDLOCK)
       `);
       const ticketId = idResult.recordset[0].NextId;
 
@@ -127,10 +161,10 @@ const createTicket = async (req, res) => {
       insertRequest.input('Status', sql.NVarChar(50), 'Pending');
       insertRequest.input('TicketDescription', sql.NVarChar(sql.MAX), description);
       await insertRequest.query(`
-        INSERT INTO Dome.dbo.PMSTickets
-          (TicketId, EmpId, TicketType, Status, TicketDescription, AssignedTo, UpdateDate, ClosingRemarks)
+        INSERT INTO ${TICKETS_TABLE}
+          (Ticketid, EmpId, TicketType, Status, TicketDescription, AssignedTo, CreatedAt, UpdateDate, ClosingRemarks)
         VALUES
-          (@TicketId, @EmpId, @TicketType, @Status, @TicketDescription, NULL, NULL, NULL)
+          (@TicketId, @EmpId, @TicketType, @Status, @TicketDescription, NULL, SYSDATETIME(), SYSDATETIME(), NULL)
       `);
       await transaction.commit();
       res.json({ success: true, data: { ticketId } });
@@ -174,28 +208,34 @@ router.get('/:id', authenticateToken, async (req, res) => {
     request.input('TicketId', sql.Int, ticketId);
     const ticket = await request.query(`
       SELECT
-        t.TicketId, t.EmpId, e.FirstName, t.TicketType, t.Status, t.TicketDescription,
+        t.Ticketid AS TicketId, t.EmpId, e.FirstName, t.TicketType, t.Status, t.TicketDescription,
         t.AssignedTo, a.FirstName AS AssignedName,
         CONVERT(varchar(19), t.CreatedAt, 120) AS CreatedAt,
         CONVERT(varchar(19), t.UpdateDate, 120) AS UpdateDate,
         t.ClosingRemarks
-      FROM Dome.dbo.PMSTickets t
+      FROM ${TICKETS_TABLE} t
       LEFT JOIN HCM_GMS.dbo.MstEmployee e ON e.EmpID = t.EmpId
       LEFT JOIN HCM_GMS.dbo.MstEmployee a ON a.EmpID = TRY_CAST(t.AssignedTo AS INT)
-      WHERE t.TicketId = @TicketId
+      WHERE t.Ticketid = @TicketId
     `);
     const row = ticket.recordset[0];
     if (!row) {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
-    const remarks = parseRemarks(row.ClosingRemarks).map((item, index) => ({
-      RemarkId: index + 1,
-      Remark: item.remark,
-      CreatedAt: item.createdAt,
-      EmpId: item.empId,
-      FirstName: item.name,
-    }));
-    res.json({ success: true, data: { ...row, remarks } });
+    const remarks = parseRemarks(row.ClosingRemarks);
+    res.json({
+      success: true,
+      data: {
+        ...row,
+        remarks: remarks.map(({ RemarkId, Remark, CreatedAt, EmpId, FirstName }) => ({
+          RemarkId,
+          Remark,
+          CreatedAt,
+          EmpId,
+          FirstName,
+        })),
+      },
+    });
   } catch (err) {
     console.error('Error loading ticket:', err);
     res.status(500).json({ success: false, message: err.message });
@@ -215,7 +255,7 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     if (status === 'Closed') {
       const existing = await pool.request()
         .input('TicketId', sql.Int, ticketId)
-        .query(`SELECT ClosingRemarks FROM Dome.dbo.PMSTickets WHERE TicketId = @TicketId`);
+        .query(`SELECT ClosingRemarks FROM ${TICKETS_TABLE} WHERE Ticketid = @TicketId`);
       if (!existing.recordset[0]) {
         return res.status(404).json({ success: false, message: 'Ticket not found' });
       }
@@ -230,12 +270,12 @@ router.patch('/:id', authenticateToken, async (req, res) => {
     request.input('AssignedTo', sql.Int, assignedTo);
     request.input('HasAssignee', sql.Bit, hasAssignee ? 1 : 0);
     const result = await request.query(`
-      UPDATE Dome.dbo.PMSTickets
+      UPDATE ${TICKETS_TABLE}
       SET
         Status = COALESCE(@Status, Status),
-        AssignedTo = CASE WHEN @HasAssignee = 1 THEN CAST(@AssignedTo AS NVARCHAR(50)) ELSE AssignedTo END,
-        UpdateDate = CASE WHEN @Status IS NOT NULL THEN SYSDATETIME() ELSE UpdateDate END
-      WHERE TicketId = @TicketId
+        AssignedTo = CASE WHEN @HasAssignee = 1 THEN CAST(@AssignedTo AS VARCHAR(MAX)) ELSE AssignedTo END,
+        UpdateDate = CASE WHEN @Status IS NOT NULL OR @HasAssignee = 1 THEN SYSDATETIME() ELSE UpdateDate END
+      WHERE Ticketid = @TicketId
     `);
     if (!result.rowsAffected[0]) {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
@@ -258,29 +298,28 @@ router.post('/:id/remarks', authenticateToken, async (req, res) => {
     const pool = await poolPromise;
     const current = await pool.request()
       .input('TicketId', sql.Int, ticketId)
-      .query(`SELECT ClosingRemarks FROM Dome.dbo.PMSTickets WHERE TicketId = @TicketId`);
+      .query(`SELECT ClosingRemarks FROM ${TICKETS_TABLE} WHERE Ticketid = @TicketId`);
     if (!current.recordset[0]) {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
     const employee = empId
       ? await pool.request().input('EmpId', sql.Int, empId).query(`SELECT FirstName FROM HCM_GMS.dbo.MstEmployee WHERE EmpID = @EmpId`)
       : { recordset: [] };
-    const stamp = new Date();
-    const createdAt = `${stamp.getFullYear()}-${String(stamp.getMonth() + 1).padStart(2, '0')}-${String(stamp.getDate()).padStart(2, '0')} ${String(stamp.getHours()).padStart(2, '0')}:${String(stamp.getMinutes()).padStart(2, '0')}:${String(stamp.getSeconds()).padStart(2, '0')}`;
+    const firstName = employee.recordset[0]?.FirstName || '';
     const remarks = parseRemarks(current.recordset[0].ClosingRemarks);
     remarks.push({
-      empId,
-      name: employee.recordset[0]?.FirstName || '',
-      remark,
-      createdAt,
+      EmpId: empId,
+      FirstName: firstName,
+      Remark: remark,
+      CreatedAt: new Date().toISOString(),
     });
     await pool.request()
       .input('TicketId', sql.Int, ticketId)
-      .input('ClosingRemarks', sql.NVarChar(sql.MAX), JSON.stringify(remarks))
+      .input('ClosingRemarks', sql.NVarChar(sql.MAX), JSON.stringify(toStorageRemarks(remarks)))
       .query(`
-        UPDATE Dome.dbo.PMSTickets
-        SET ClosingRemarks = @ClosingRemarks
-        WHERE TicketId = @TicketId
+        UPDATE ${TICKETS_TABLE}
+        SET ClosingRemarks = @ClosingRemarks, UpdateDate = SYSDATETIME()
+        WHERE Ticketid = @TicketId
       `);
     res.json({ success: true });
   } catch (err) {

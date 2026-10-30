@@ -681,17 +681,20 @@ const toNullableNumber = (value) => {
 const getTodayWorkingPlans = async (req, res) => {
   try {
     const pool = await poolPromise;
+    const isoOk = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
     const rawDate = String(req.query.date || "").trim();
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
-      ? rawDate
-      : new Date().toISOString().split("T")[0];
+    const date = isoOk(rawDate) ? rawDate : new Date().toISOString().split("T")[0];
+    const fromDate = isoOk(req.query.fromDate) ? String(req.query.fromDate).trim() : date;
+    const toDate = isoOk(req.query.toDate) ? String(req.query.toDate).trim() : date;
     const result = await pool.request()
-      .input("PlanDate", sql.Date, date)
+      .input("FromDate", sql.Date, fromDate)
+      .input("ToDate", sql.Date, toDate)
       .query(`
-        SELECT P.Id, P.PlanDate, P.Line, P.PO, P.Shift, P.Supervisor, P.Persons
+        SELECT P.Id, CONVERT(varchar(10), P.PlanDate, 23) AS PlanDate, P.Line, P.PO, P.Shift, P.Supervisor, P.Persons
         FROM Dome.dbo.PmsProductionPlanning P
-        WHERE CAST(P.PlanDate AS DATE) = @PlanDate
-        ORDER BY P.Line, P.PO
+        WHERE CAST(P.PlanDate AS DATE) >= @FromDate
+          AND CAST(P.PlanDate AS DATE) <= @ToDate
+        ORDER BY P.PlanDate, P.Line, P.PO
       `);
 
     const staffIds = new Set();
@@ -834,6 +837,8 @@ const getTodayWorkingPlans = async (req, res) => {
     res.json({
       success: true,
       date,
+      fromDate,
+      toDate,
       kpis: {
         workingPOs: workingPOs.size,
         scheduledLines: scheduledLines.size,
