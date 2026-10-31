@@ -812,9 +812,17 @@ exports.getPostedGrns = async (req, res) => {
         .map((row) => row.DocEntry || row.GrnNo)
     ).size;
     const openRows = rows.filter((row) => row.Sampled !== 1);
+    const seenGrnItem = new Set();
+    const uniqueOpenRows = [];
+    for (const row of openRows) {
+      const key = `${row.GrnNo}::${row.ItemCode || ""}::${row.ItemName || ""}`;
+      if (seenGrnItem.has(key)) continue;
+      seenGrnItem.add(key);
+      uniqueOpenRows.push(row);
+    }
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(10, Number(req.query.limit) || 20));
-    const total = openRows.length;
+    const total = uniqueOpenRows.length;
     const offset = (page - 1) * limit;
 
     res.json({
@@ -825,7 +833,7 @@ exports.getPostedGrns = async (req, res) => {
         notSampled: postedUnsampled,
         underInspection: uiGrns.size,
         pendingDisposition,
-        rows: openRows.slice(offset, offset + limit),
+        rows: uniqueOpenRows.slice(offset, offset + limit),
       },
       pagination: {
         page,
