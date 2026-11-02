@@ -359,17 +359,39 @@ exports.getSavedSamples = async (req, res) => {
     let joinClause = '';
     let whereClause = '';
     let extraSelect = '';
+    let statusListForDisplay = [];
     
     const conditions = [];
     const allowedStatuses = ['A', 'UI', 'P', 'S', 'R', 'CA', 'CR', 'C'];
 
     if (req.query.status) {
-       joinClause = `JOIN DOME.dbo.[@XD_SMP1] b ON a.docentry = b.docentry`;
        const statuses = req.query.status.split(',').map(s => s.trim()).filter(s => allowedStatuses.includes(s));
        if (statuses.length) {
-         conditions.push(`b.U_status IN (${statuses.map(s => `'${s}'`).join(',')})`);
+         statusListForDisplay = statuses;
+         const statusIn = statuses.map((s) => `'${s}'`).join(',');
+         // EXISTS keeps one row per sampling doc (JOIN was duplicating per matching line)
+         conditions.push(`EXISTS (
+           SELECT 1
+           FROM DOME.dbo.[@XD_SMP1] b
+           WHERE b.DocEntry = a.DocEntry
+             AND b.U_status IN (${statusIn})
+         )`);
+         extraSelect = `,
+           (
+             SELECT TOP 1 b2.U_ItemName
+             FROM DOME.dbo.[@XD_SMP1] b2
+             WHERE b2.DocEntry = a.DocEntry
+               AND b2.U_status IN (${statusIn})
+             ORDER BY b2.LineId
+           ) AS [Item Name],
+           (
+             SELECT TOP 1 b2.U_Batch
+             FROM DOME.dbo.[@XD_SMP1] b2
+             WHERE b2.DocEntry = a.DocEntry
+               AND b2.U_status IN (${statusIn})
+             ORDER BY b2.LineId
+           ) AS [Batch]`;
        }
-       extraSelect = `, b.U_ItemName as [Item Name], b.U_Batch as [Batch]`;
     }
 
     const search = String(req.query.search || '').trim();
@@ -426,7 +448,7 @@ exports.getSavedSamples = async (req, res) => {
         a.U_DocEntry as [Document Entry],
         STUFF((
           SELECT DISTINCT ', ' +
-            CASE b.U_status
+            CASE st.U_status
               WHEN 'A' THEN 'Accepted'
               WHEN 'UI' THEN 'Under Inspection'
               WHEN 'P' THEN 'Pending'
@@ -435,10 +457,13 @@ exports.getSavedSamples = async (req, res) => {
               WHEN 'CA' THEN 'Conditionally Accepted'
               WHEN 'CR' THEN 'Conditionally Rejected'
               WHEN 'C' THEN 'Cancel'
-              ELSE b.U_status
+              ELSE st.U_status
             END
-          FROM DOME.dbo.[@XD_SMP1] b
-          WHERE b.DocEntry = a.DocEntry
+          FROM DOME.dbo.[@XD_SMP1] st
+          WHERE st.DocEntry = a.DocEntry
+            ${statusListForDisplay.length
+              ? `AND st.U_status IN (${statusListForDisplay.map((s) => `'${s}'`).join(',')})`
+              : ''}
           FOR XML PATH(''), TYPE
         ).value('.', 'nvarchar(max)'), 1, 2, '') AS [Status]
         ${extraSelect}
@@ -494,24 +519,10 @@ exports.getSavedSampleDetails = async (req, res) => {
         FROM DOME.dbo.[@XD_OQUL] Q0 WITH (NOLOCK)
         WHERE @samplingNo IS NOT NULL
           AND Q0.U_SampleNumber = @samplingNo
-          AND (
-            Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
-            OR (
-              NULLIF(LTRIM(RTRIM(ISNULL(L.U_Batch, ''))), '') IS NOT NULL
-              AND Q0.U_Batch COLLATE DATABASE_DEFAULT = L.U_Batch COLLATE DATABASE_DEFAULT
-            )
-          )
-        ORDER BY
-          CASE
-            WHEN Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
-             AND NULLIF(LTRIM(RTRIM(ISNULL(L.U_Batch, ''))), '') IS NOT NULL
-             AND Q0.U_Batch COLLATE DATABASE_DEFAULT = L.U_Batch COLLATE DATABASE_DEFAULT
-            THEN 0
-            WHEN Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
-            THEN 1
-            ELSE 2
-          END,
-          Q0.DocEntry DESC
+          AND Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
+          AND ISNULL(NULLIF(LTRIM(RTRIM(Q0.U_Batch)), ''), '') COLLATE DATABASE_DEFAULT
+            = ISNULL(NULLIF(LTRIM(RTRIM(L.U_Batch)), ''), '') COLLATE DATABASE_DEFAULT
+        ORDER BY Q0.DocEntry DESC
       ) Q
       WHERE L.DocEntry = @docentry
       ORDER BY L.LineId

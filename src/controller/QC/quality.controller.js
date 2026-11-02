@@ -66,15 +66,15 @@ exports.getQualityRecords = async (req, res) => {
           H.U_InsITR AS [Inspection ITR],
           H.U_Manage AS [Managed By],
           H.U_SmpBy AS [Sample By],
-          H.U_SmpByName AS [Sample By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_SmpByName)), ''), SmpEmp.FirstName) AS [Sample By Name],
           H.U_InpBy AS [Inspected By],
-          H.U_InpByName AS [Inspected By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_InpByName)), ''), InpEmp.FirstName) AS [Inspected By Name],
           H.U_AnlyzBy AS [Analyzed By],
-          H.U_AnlyzByName AS [Analyzed By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_AnlyzByName)), ''), AnlyzEmp.FirstName) AS [Analyzed By Name],
           H.U_RevBy AS [Reviewed By],
-          H.U_RevByName AS [Reviewed By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_RevByName)), ''), RevEmp.FirstName) AS [Reviewed By Name],
           H.U_RepBy AS [Report By],
-          H.U_RepByName AS [Report By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_RepByName)), ''), RepEmp.FirstName) AS [Report By Name],
           CASE WHEN H.U_QCDecision = 'A' THEN 'Accepted'
                WHEN H.U_QCDecision = 'R' THEN 'Rejected'
                WHEN H.U_QCDecision = 'CA' THEN 'Conditionally Accepted'
@@ -89,6 +89,31 @@ exports.getQualityRecords = async (req, res) => {
           H.CreateDate AS [Create Date],
           H.UpdateDate AS [Update Date]
       FROM DOME.dbo.[@XD_OQUL] H
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_SmpBy AS VARCHAR(50))
+      ) SmpEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_InpBy AS VARCHAR(50))
+      ) InpEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_AnlyzBy AS VARCHAR(50))
+      ) AnlyzEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_RevBy AS VARCHAR(50))
+      ) RevEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_RepBy AS VARCHAR(50))
+      ) RepEmp
       ${statusFilter}
       ORDER BY H.DocEntry DESC
       OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY
@@ -133,8 +158,6 @@ exports.getQualityDecisions = async (req, res) => {
       { value: 'R', label: 'Rejected' },
       { value: 'CA', label: 'Conditionally Accepted' },
       { value: 'CR', label: 'Conditionally Rejected' },
-      { value: 'P', label: 'Pending' },
-      { value: 'UI', label: 'Under Inspection' }
     ];
     
     res.json({
@@ -188,15 +211,15 @@ exports.getQualityRecordDetails = async (req, res) => {
           H.U_InsITR AS [Inspection ITR],
           H.U_Manage AS [Managed By],
           H.U_SmpBy AS [Sample By],
-          H.U_SmpByName AS [Sample By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_SmpByName)), ''), SmpEmp.FirstName) AS [Sample By Name],
           H.U_InpBy AS [Inspected By],
-          H.U_InpByName AS [Inspected By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_InpByName)), ''), InpEmp.FirstName) AS [Inspected By Name],
           H.U_AnlyzBy AS [Analyzed By],
-          H.U_AnlyzByName AS [Analyzed By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_AnlyzByName)), ''), AnlyzEmp.FirstName) AS [Analyzed By Name],
           H.U_RevBy AS [Reviewed By],
-          H.U_RevByName AS [Reviewed By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_RevByName)), ''), RevEmp.FirstName) AS [Reviewed By Name],
           H.U_RepBy AS [Report By],
-          H.U_RepByName AS [Report By Name],
+          ISNULL(NULLIF(LTRIM(RTRIM(H.U_RepByName)), ''), RepEmp.FirstName) AS [Report By Name],
           CASE WHEN H.U_QCDecision = 'A' THEN 'Accepted'
                WHEN H.U_QCDecision = 'R' THEN 'Rejected'
                WHEN H.U_QCDecision = 'CA' THEN 'Conditionally Accepted'
@@ -228,6 +251,31 @@ exports.getQualityRecordDetails = async (req, res) => {
       FROM DOME.dbo.[@XD_OQUL] H
       LEFT JOIN DOME.dbo.[@XD_QUL1] D
           ON D.DocEntry = H.DocEntry
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_SmpBy AS VARCHAR(50))
+      ) SmpEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_InpBy AS VARCHAR(50))
+      ) InpEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_AnlyzBy AS VARCHAR(50))
+      ) AnlyzEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_RevBy AS VARCHAR(50))
+      ) RevEmp
+      OUTER APPLY (
+        SELECT TOP 1 E.FirstName
+        FROM HCM_GMS.dbo.MstEmployee E
+        WHERE CAST(E.EmpID AS VARCHAR(50)) = CAST(H.U_RepBy AS VARCHAR(50))
+      ) RepEmp
       WHERE H.DocEntry = @DocEntry
       ORDER BY D.LineId
     `;
@@ -614,19 +662,16 @@ exports.createQualityRecord = async (req, res) => {
         linkRequest.input('QCDecision', sql.NVarChar, data.qcDecision || 'A');
         linkRequest.input('QualityDocEntry', sql.Int, docEntry);
 
+        // Match one sample line only: same item + same batch (OR was updating every line with that item)
         await linkRequest.query(`
           UPDATE L
           SET L.U_Status = @QCDecision
           FROM DOME.dbo.[@XD_SMP1] L
           INNER JOIN DOME.dbo.[@XD_OSMP] H ON H.DocEntry = L.DocEntry
           WHERE H.DocNum = @SampleNumber
-            AND (
-              L.U_ItemCode COLLATE DATABASE_DEFAULT = @ItemCode COLLATE DATABASE_DEFAULT
-              OR (
-                NULLIF(LTRIM(RTRIM(ISNULL(@Batch, ''))), '') IS NOT NULL
-                AND L.U_Batch COLLATE DATABASE_DEFAULT = @Batch COLLATE DATABASE_DEFAULT
-              )
-            )
+            AND L.U_ItemCode COLLATE DATABASE_DEFAULT = @ItemCode COLLATE DATABASE_DEFAULT
+            AND ISNULL(NULLIF(LTRIM(RTRIM(L.U_Batch)), ''), '') COLLATE DATABASE_DEFAULT
+              = ISNULL(NULLIF(LTRIM(RTRIM(@Batch)), ''), '') COLLATE DATABASE_DEFAULT
         `);
       }
 
