@@ -605,6 +605,31 @@ exports.createQualityRecord = async (req, res) => {
         }
       }
 
+      // Link result back to sample line (U_SampleNumber + item/batch) and sync status
+      if (data.samplingNo) {
+        const linkRequest = new sql.Request(transaction);
+        linkRequest.input('SampleNumber', sql.Int, parseInt(data.samplingNo, 10));
+        linkRequest.input('ItemCode', sql.NVarChar, data.itemCode || null);
+        linkRequest.input('Batch', sql.NVarChar, data.selectedBatch || null);
+        linkRequest.input('QCDecision', sql.NVarChar, data.qcDecision || 'A');
+        linkRequest.input('QualityDocEntry', sql.Int, docEntry);
+
+        await linkRequest.query(`
+          UPDATE L
+          SET L.U_Status = @QCDecision
+          FROM DOME.dbo.[@XD_SMP1] L
+          INNER JOIN DOME.dbo.[@XD_OSMP] H ON H.DocEntry = L.DocEntry
+          WHERE H.DocNum = @SampleNumber
+            AND (
+              L.U_ItemCode COLLATE DATABASE_DEFAULT = @ItemCode COLLATE DATABASE_DEFAULT
+              OR (
+                NULLIF(LTRIM(RTRIM(ISNULL(@Batch, ''))), '') IS NOT NULL
+                AND L.U_Batch COLLATE DATABASE_DEFAULT = @Batch COLLATE DATABASE_DEFAULT
+              )
+            )
+        `);
+      }
+
       await transaction.commit();
       
       res.json({

@@ -481,9 +481,40 @@ exports.getSavedSampleDetails = async (req, res) => {
     
     const header = headerResult.recordset[0];
     request.input('docentry', sql.Int, header.DocEntry);
-    
+    request.input('samplingNo', sql.Int, header.DocNum || header.Docnum || null);
+
     const linesResult = await request.query(`
-      SELECT * FROM DOME.dbo.[@XD_SMP1] WHERE DocEntry = @docentry
+      SELECT
+        L.*,
+        Q.DocEntry AS SampleId,
+        Q.U_QCDecision AS QualityDecision
+      FROM DOME.dbo.[@XD_SMP1] L
+      OUTER APPLY (
+        SELECT TOP 1 Q0.DocEntry, Q0.U_QCDecision
+        FROM DOME.dbo.[@XD_OQUL] Q0 WITH (NOLOCK)
+        WHERE @samplingNo IS NOT NULL
+          AND Q0.U_SampleNumber = @samplingNo
+          AND (
+            Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
+            OR (
+              NULLIF(LTRIM(RTRIM(ISNULL(L.U_Batch, ''))), '') IS NOT NULL
+              AND Q0.U_Batch COLLATE DATABASE_DEFAULT = L.U_Batch COLLATE DATABASE_DEFAULT
+            )
+          )
+        ORDER BY
+          CASE
+            WHEN Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
+             AND NULLIF(LTRIM(RTRIM(ISNULL(L.U_Batch, ''))), '') IS NOT NULL
+             AND Q0.U_Batch COLLATE DATABASE_DEFAULT = L.U_Batch COLLATE DATABASE_DEFAULT
+            THEN 0
+            WHEN Q0.U_ItemCode COLLATE DATABASE_DEFAULT = L.U_ItemCode COLLATE DATABASE_DEFAULT
+            THEN 1
+            ELSE 2
+          END,
+          Q0.DocEntry DESC
+      ) Q
+      WHERE L.DocEntry = @docentry
+      ORDER BY L.LineId
     `);
     
     res.json({
