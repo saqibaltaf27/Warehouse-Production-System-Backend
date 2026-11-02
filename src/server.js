@@ -70,9 +70,7 @@ app.use("/api/lds-dx", ldsDxRoutes);
 app.use("/api/coa-template", coaTemplateRoutes);
 app.use("/api/quality", qualityRoutes);
 app.use(errorHandler);
-
 const PORT = process.env.PORT || 3001;
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 WMS Server running on: http://localhost:${PORT}`);
   setInterval(() => {}, 1000 * 60 * 60);
