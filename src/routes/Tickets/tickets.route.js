@@ -3,7 +3,7 @@ const authenticateToken = require('../../middleware/auth.middleware');
 const express = require('express');
 const router = express.Router();
 
-const TICKET_TYPES = ['Quality', 'Production', 'Engineering'];
+const TICKET_TYPES = ['Quality', 'Production', 'Engineering', 'Administration'];
 const TICKET_STATUSES = ['Pending', 'In Process', 'Closed'];
 const TICKETS_TABLE = 'Dome.dbo.TicketRequests';
 
@@ -56,7 +56,7 @@ const listTickets = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Employee id is missing' });
     }
     if (ticketType && !TICKET_TYPES.includes(ticketType)) {
-      return res.status(400).json({ success: false, message: 'Ticket type must be Quality, Production, or Engineering' });
+      return res.status(400).json({ success: false, message: 'Ticket type must be Quality, Production, Engineering, or Administration' });
     }
     const search = String(req.query.search || '').trim();
     const assignedTo = String(req.query.assignedTo || '').trim();
@@ -96,7 +96,7 @@ const listTickets = async (req, res) => {
         LEFT JOIN HCM_GMS.dbo.MstEmployee a ON a.EmpID = TRY_CAST(t.AssignedTo AS INT)
         WHERE (@EmpId = 0 OR t.EmpId = @EmpId)
           AND (
-            (@TicketType = '' AND t.TicketType IN ('Quality', 'Production', 'Engineering'))
+            (@TicketType = '' AND t.TicketType IN ('Quality', 'Production', 'Engineering', 'Administration'))
             OR t.TicketType = @TicketType
           )
           AND (
@@ -134,7 +134,7 @@ const createTicket = async (req, res) => {
     const empId = parseInt(req.user?.empId, 10);
 
     if (!TICKET_TYPES.includes(ticketType)) {
-      return res.status(400).json({ success: false, message: 'Ticket type must be Quality, Production, or Engineering' });
+      return res.status(400).json({ success: false, message: 'Ticket type must be Quality, Production, Engineering, or Administration' });
     }
     if (!description) {
       return res.status(400).json({ success: false, message: 'Description is required' });
@@ -190,6 +190,7 @@ router.get('/employees', authenticateToken, async (req, res) => {
           DepartmentName LIKE '%production%'
           OR DepartmentName LIKE '%quality%'
           OR DepartmentName LIKE '%engineer%'
+          OR DepartmentName LIKE '%admin%'
         )
       ORDER BY FirstName
     `);

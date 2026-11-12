@@ -47,6 +47,7 @@ app.get("/api/health", (req, res) => {
 });
 
 const coaTemplateRoutes = require("./routes/QC/coaTemplate.route");
+const coaReportRoutes = require("./routes/QC/coaReport.route");
 const qualityRoutes = require("./routes/QC/quality.routes");
 
 app.use("/api/auth", authRoutes);
@@ -68,6 +69,7 @@ app.use("/api/sampling", samplingRoutes);
 app.use("/api/tickets", ticketRoutes);
 app.use("/api/lds-dx", ldsDxRoutes);
 app.use("/api/coa-template", coaTemplateRoutes);
+app.use("/api/coa-report", coaReportRoutes);
 app.use("/api/quality", qualityRoutes);
 app.use(errorHandler);
 const PORT = process.env.PORT || 3001;

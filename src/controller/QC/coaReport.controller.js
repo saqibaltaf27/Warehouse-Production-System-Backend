@@ -1,0 +1,322 @@
+const { sql, poolPromise } = require('../../database/connection');
+
+const mapHeader = (body, status) => ({
+  DocNum: body.docNum ?? null,
+  Status: status,
+  FormNo: body.formNo || null,
+  IssueDate: body.issueDate || null,
+  ItemCode: body.itemCode || null,
+  ItemName: body.itemName || null,
+  ProductTop: body.productTop || null,
+  ProductLine: body.productLine || null,
+  Composition: body.composition || null,
+  Product: body.product || null,
+  CatNo: body.catNo || null,
+  BatchNo: body.batchNo || body.batch || null,
+  PackSize: body.packSize || null,
+  BatchSize: body.batchSize || null,
+  MfgDate: body.mfgDate || null,
+  ExpDate: body.expDate || null,
+  SopNo: body.sopNo || null,
+  ProcessStage: body.processStage || null,
+  RevisionNo: body.revisionNo || null,
+  RegNo: body.regNo || body.reg || null,
+  DateReported: body.dateReported || null,
+  Remarks: body.remarks || null,
+  AnalyzedByName: body.analyzedBy?.name || body.analyzedByName || null,
+  AnalyzedByTitle: body.analyzedBy?.title || body.analyzedByTitle || null,
+  AnalyzedByDate: body.analyzedBy?.date || body.analyzedByDate || null,
+  CheckedByName: body.checkedBy?.name || body.checkedByName || null,
+  CheckedByTitle: body.checkedBy?.title || body.checkedByTitle || null,
+  CheckedByDate: body.checkedBy?.date || body.checkedByDate || null,
+  ApprovedByName: body.approvedBy?.name || body.approvedByName || null,
+  ApprovedByTitle: body.approvedBy?.title || body.approvedByTitle || null,
+  ApprovedByDate: body.approvedBy?.date || body.approvedByDate || null,
+});
+
+const bindHeader = (request, header) => {
+  Object.entries(header).forEach(([key, value]) => {
+    request.input(key, value);
+  });
+  return request;
+};
+
+const replaceTests = async (transaction, coaNo, tests = []) => {
+  await new sql.Request(transaction)
+    .input('COA_No', sql.Int, coaNo)
+    .query(`DELETE FROM DOME.dbo.PMSCOAReportTest WHERE COA_No = @COA_No`);
+
+  for (let i = 0; i < tests.length; i++) {
+    const t = tests[i] || {};
+    await new sql.Request(transaction)
+      .input('COA_No', sql.Int, coaNo)
+      .input('LineId', sql.Int, i + 1)
+      .input('Tests', sql.NVarChar(sql.MAX), t.tests || t.test || null)
+      .input('Specifications', sql.NVarChar(sql.MAX), t.specifications || t.specification || null)
+      .input('AnalyzedBy', sql.NVarChar(100), t.analyzedBy || null)
+      .input('Result', sql.NVarChar(500), t.result || null)
+      .input('Conclusion', sql.NVarChar(500), t.conclusion || null)
+      .query(`
+        INSERT INTO DOME.dbo.PMSCOAReportTest
+          (COA_No, LineId, Tests, Specifications, AnalyzedBy, Result, Conclusion)
+        VALUES
+          (@COA_No, @LineId, @Tests, @Specifications, @AnalyzedBy, @Result, @Conclusion)
+      `);
+  }
+};
+
+const listCOAReports = async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+
+    const pool = await poolPromise;
+    const countResult = await pool.request().query(`
+      SELECT COUNT(1) AS Total FROM DOME.dbo.PMSCOAReport
+    `);
+    const total = countResult.recordset[0]?.Total || 0;
+
+    const result = await pool.request()
+      .input('Offset', sql.Int, offset)
+      .input('Limit', sql.Int, limit)
+      .query(`
+        SELECT
+          H.COA_No,
+          H.DocNum,
+          H.Status,
+          H.FormNo,
+          H.IssueDate,
+          H.ItemCode,
+          H.ItemName,
+          H.ProductTop,
+          H.ProductLine,
+          H.Product,
+          H.BatchNo,
+          H.CreatedBy,
+          H.CreatedByName,
+          H.CreatedAt,
+          H.UpdatedBy,
+          H.UpdatedByName,
+          H.UpdatedAt,
+          H.GeneratedAt
+        FROM DOME.dbo.PMSCOAReport H
+        ORDER BY H.COA_No DESC
+        OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
+      `);
+
+    res.json({
+      success: true,
+      data: result.recordset,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.max(1, Math.ceil(total / limit) || 1)
+      }
+    });
+  } catch (error) {
+    console.error('Error listing COA reports:', error);
+    res.status(500).json({ success: false, message: 'Failed to list COA reports' });
+  }
+};
+
+const getUsedBatches = async (req, res) => {
+  try {
+    const itemCode = (req.query.itemCode || '').trim();
+    if (!itemCode) {
+      return res.status(400).json({ success: false, message: 'itemCode is required' });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input('ItemCode', sql.NVarChar(50), itemCode)
+      .query(`
+        SELECT DISTINCT BatchNo
+        FROM DOME.dbo.PMSCOAReport
+        WHERE ItemCode = @ItemCode
+          AND ISNULL(BatchNo, '') <> ''
+      `);
+
+    res.json({
+      success: true,
+      data: result.recordset.map((row) => row.BatchNo)
+    });
+  } catch (error) {
+    console.error('Error fetching used COA batches:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch used batches' });
+  }
+};
+
+const getCOAReport = async (req, res) => {
+  try {
+    const coaNo = parseInt(req.params.coaNo, 10);
+    if (!coaNo) {
+      return res.status(400).json({ success: false, message: 'COA_No is required' });
+    }
+
+    const pool = await poolPromise;
+    const headerResult = await pool.request()
+      .input('COA_No', sql.Int, coaNo)
+      .query(`SELECT * FROM DOME.dbo.PMSCOAReport WHERE COA_No = @COA_No`);
+
+    if (!headerResult.recordset.length) {
+      return res.status(404).json({ success: false, message: 'COA report not found' });
+    }
+
+    const testsResult = await pool.request()
+      .input('COA_No', sql.Int, coaNo)
+      .query(`
+        SELECT LineId, Tests, Specifications, AnalyzedBy, Result, Conclusion
+        FROM DOME.dbo.PMSCOAReportTest
+        WHERE COA_No = @COA_No
+        ORDER BY LineId
+      `);
+
+    res.json({
+      success: true,
+      data: {
+        ...headerResult.recordset[0],
+        tests: testsResult.recordset
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching COA report:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch COA report' });
+  }
+};
+
+const saveCOAReport = async (req, res) => {
+  const pool = await poolPromise;
+  const transaction = new sql.Transaction(pool);
+
+  try {
+    const body = req.body || {};
+    const status = body.status === 'Generated' ? 'Generated' : 'Draft';
+    const coaNoInput = body.coaNo ? parseInt(body.coaNo, 10) : null;
+    const tests = Array.isArray(body.tests) ? body.tests : [];
+    const userId = body.createdBy || body.updatedBy || 0;
+    const userName = body.createdByName || body.updatedByName || null;
+    const header = mapHeader(body, status);
+
+    await transaction.begin();
+
+    let coaNo = coaNoInput;
+    const isUpdate = Boolean(coaNo);
+
+    if (isUpdate) {
+      const exists = await new sql.Request(transaction)
+        .input('COA_No', sql.Int, coaNo)
+        .query(`SELECT COA_No FROM DOME.dbo.PMSCOAReport WHERE COA_No = @COA_No`);
+
+      if (!exists.recordset.length) {
+        await transaction.rollback();
+        return res.status(404).json({ success: false, message: 'COA report not found' });
+      }
+
+      const updateReq = new sql.Request(transaction)
+        .input('COA_No', sql.Int, coaNo)
+        .input('UpdatedBy', sql.Int, userId)
+        .input('UpdatedByName', sql.NVarChar(100), userName);
+
+      bindHeader(updateReq, header);
+
+      await updateReq.query(`
+        UPDATE DOME.dbo.PMSCOAReport SET
+          DocNum = @DocNum,
+          Status = @Status,
+          FormNo = @FormNo,
+          IssueDate = @IssueDate,
+          ItemCode = @ItemCode,
+          ItemName = @ItemName,
+          ProductTop = @ProductTop,
+          ProductLine = @ProductLine,
+          Composition = @Composition,
+          Product = @Product,
+          CatNo = @CatNo,
+          BatchNo = @BatchNo,
+          PackSize = @PackSize,
+          BatchSize = @BatchSize,
+          MfgDate = @MfgDate,
+          ExpDate = @ExpDate,
+          SopNo = @SopNo,
+          ProcessStage = @ProcessStage,
+          RevisionNo = @RevisionNo,
+          RegNo = @RegNo,
+          DateReported = @DateReported,
+          Remarks = @Remarks,
+          AnalyzedByName = @AnalyzedByName,
+          AnalyzedByTitle = @AnalyzedByTitle,
+          AnalyzedByDate = @AnalyzedByDate,
+          CheckedByName = @CheckedByName,
+          CheckedByTitle = @CheckedByTitle,
+          CheckedByDate = @CheckedByDate,
+          ApprovedByName = @ApprovedByName,
+          ApprovedByTitle = @ApprovedByTitle,
+          ApprovedByDate = @ApprovedByDate,
+          UpdatedBy = @UpdatedBy,
+          UpdatedByName = @UpdatedByName,
+          UpdatedAt = GETDATE(),
+          GeneratedAt = CASE WHEN @Status = 'Generated' THEN ISNULL(GeneratedAt, GETDATE()) ELSE GeneratedAt END
+        WHERE COA_No = @COA_No
+      `);
+    } else {
+      const nextResult = await new sql.Request(transaction).query(`
+        SELECT ISNULL(MAX(COA_No), 0) + 1 AS NextNo FROM DOME.dbo.PMSCOAReport
+      `);
+      coaNo = nextResult.recordset[0].NextNo;
+
+      const insertReq = new sql.Request(transaction)
+        .input('COA_No', sql.Int, coaNo)
+        .input('CreatedBy', sql.Int, userId)
+        .input('CreatedByName', sql.NVarChar(100), userName)
+        .input('UpdatedBy', sql.Int, userId)
+        .input('UpdatedByName', sql.NVarChar(100), userName);
+
+      bindHeader(insertReq, header);
+
+      await insertReq.query(`
+        INSERT INTO DOME.dbo.PMSCOAReport (
+          COA_No, DocNum, Status, FormNo, IssueDate, ItemCode, ItemName,
+          ProductTop, ProductLine, Composition, Product, CatNo, BatchNo,
+          PackSize, BatchSize, MfgDate, ExpDate, SopNo, ProcessStage,
+          RevisionNo, RegNo, DateReported, Remarks,
+          AnalyzedByName, AnalyzedByTitle, AnalyzedByDate,
+          CheckedByName, CheckedByTitle, CheckedByDate,
+          ApprovedByName, ApprovedByTitle, ApprovedByDate,
+          CreatedBy, CreatedByName, CreatedAt, UpdatedBy, UpdatedByName, UpdatedAt, GeneratedAt
+        ) VALUES (
+          @COA_No, @DocNum, @Status, @FormNo, @IssueDate, @ItemCode, @ItemName,
+          @ProductTop, @ProductLine, @Composition, @Product, @CatNo, @BatchNo,
+          @PackSize, @BatchSize, @MfgDate, @ExpDate, @SopNo, @ProcessStage,
+          @RevisionNo, @RegNo, @DateReported, @Remarks,
+          @AnalyzedByName, @AnalyzedByTitle, @AnalyzedByDate,
+          @CheckedByName, @CheckedByTitle, @CheckedByDate,
+          @ApprovedByName, @ApprovedByTitle, @ApprovedByDate,
+          @CreatedBy, @CreatedByName, GETDATE(), @UpdatedBy, @UpdatedByName, GETDATE(),
+          CASE WHEN @Status = 'Generated' THEN GETDATE() ELSE NULL END
+        )
+      `);
+    }
+
+    await replaceTests(transaction, coaNo, tests);
+    await transaction.commit();
+
+    res.status(isUpdate ? 200 : 201).json({
+      success: true,
+      message: status === 'Generated' ? 'COA report generated successfully' : 'COA draft saved successfully',
+      data: { coaNo, status }
+    });
+  } catch (error) {
+    try { await transaction.rollback(); } catch (_) { /* ignore */ }
+    console.error('Error saving COA report:', error);
+    res.status(500).json({ success: false, message: 'Failed to save COA report' });
+  }
+};
+
+module.exports = {
+  listCOAReports,
+  getUsedBatches,
+  getCOAReport,
+  saveCOAReport
+};
