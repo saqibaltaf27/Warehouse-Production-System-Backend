@@ -27,6 +27,8 @@
   },
   "homepage": "https://github.com/atiq296/WMS-Backend#readme",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1171.0",
+    "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "axios": "^1.20.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
@@ -39,7 +41,8 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.1",
     "msnodesqlv8": "^5.2.3",
-    "mssql": "^12.5.2"
+    "mssql": "^12.5.2",
+    "multer": "^2.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

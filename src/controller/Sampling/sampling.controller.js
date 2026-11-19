@@ -259,6 +259,7 @@ exports.getDocumentDetails = async (req, res) => {
         T1.UomCode AS UOM,
         T1.UomEntry,
         T1.WhsCode AS Warehouse,
+        W.WhsName AS WarehouseName,
         T1.Quantity AS ActualQty,
         CASE
             WHEN B.ManBtchNum = 'Y' THEN 'Batch Managed'
@@ -276,6 +277,7 @@ exports.getDocumentDetails = async (req, res) => {
         COALESCE(BT.SuppSerial, SR.SuppSerial) AS SupplierBatchSerial
       FROM LDS_LIVE.dbo.${lineTable} T1 WITH (NOLOCK)
       INNER JOIN LDS_LIVE.dbo.OITM B WITH (NOLOCK) ON B.ItemCode = T1.ItemCode
+      LEFT JOIN LDS_LIVE.dbo.OWHS W WITH (NOLOCK) ON W.WhsCode = T1.WhsCode
       OUTER APPLY (
           SELECT TOP 1
             X.BatchNum,
@@ -511,9 +513,12 @@ exports.getSavedSampleDetails = async (req, res) => {
     const linesResult = await request.query(`
       SELECT
         L.*,
+        W.WhsName AS WarehouseName,
         Q.DocEntry AS SampleId,
         Q.U_QCDecision AS QualityDecision
       FROM DOME.dbo.[@XD_SMP1] L
+      LEFT JOIN LDS_LIVE.dbo.OWHS W WITH (NOLOCK)
+        ON W.WhsCode COLLATE DATABASE_DEFAULT = L.U_WhsCode COLLATE DATABASE_DEFAULT
       OUTER APPLY (
         SELECT TOP 1 Q0.DocEntry, Q0.U_QCDecision
         FROM DOME.dbo.[@XD_OQUL] Q0 WITH (NOLOCK)

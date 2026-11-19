@@ -20,9 +20,8 @@ const config = {
 module.exports = config;
 
 
-
+// // Local Database
 // const dbName = process.env.LDS_Database;
-
 // const config = process.env.DB_DRIVER === 'msnodesqlv8'
 //   ? {
 //     connectionString: `Driver={ODBC Driver 17 for SQL Server};Server=${process.env.Database_Server};Database=${dbName};Trusted_Connection=yes;TrustServerCertificate=yes;`,

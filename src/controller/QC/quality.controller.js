@@ -620,22 +620,23 @@ exports.createQualityRecord = async (req, res) => {
           const line = data.lines[i];
           const lineRequest = new sql.Request(transaction);
           
+          const typeVal = String(line['Type'] || line['Parameter Type'] || 'M').charAt(0) || 'M';
           lineRequest.input('DocEntry', sql.Int, docEntry);
           lineRequest.input('LineId', sql.Int, i + 1);
-          lineRequest.input('U_PrmCode', sql.NVarChar, line['Parameter Code']);
-          lineRequest.input('U_PrmName', sql.NVarChar, line['Parameter Name']);
-          lineRequest.input('U_Action', sql.NVarChar, line['Action']);
-          lineRequest.input('U_Criteria', sql.NVarChar, line['Criteria']);
-          lineRequest.input('U_EqpCode', sql.NVarChar, line['Equipment Code']);
-          lineRequest.input('U_EqpName', sql.NVarChar, line['Equipment Name']);
-          lineRequest.input('U_Uom', sql.NVarChar, line['UOM']);
-          lineRequest.input('U_StdValue', sql.NVarChar, line['Std Value']);
-          lineRequest.input('U_MinValue', sql.NVarChar, line['Min Value']);
-          lineRequest.input('U_MaxValue', sql.NVarChar, line['Max Value']);
-          lineRequest.input('U_Type', sql.NVarChar, line['Type'] || line['Parameter Type']);
-          lineRequest.input('U_ObValue1', sql.NVarChar, line['Observed Value 1']);
-          lineRequest.input('U_ObValue2', sql.NVarChar, line['Observed Value 2']);
-          lineRequest.input('U_ObValue3', sql.NVarChar, line['Observed Value 3']);
+          lineRequest.input('U_PrmCode', sql.NVarChar(50), line['Parameter Code'] || null);
+          lineRequest.input('U_PrmName', sql.NVarChar(200), line['Parameter Name'] || null);
+          lineRequest.input('U_Action', sql.NVarChar(sql.MAX), line['Action'] || null);
+          lineRequest.input('U_Criteria', sql.NVarChar(sql.MAX), line['Criteria'] || null);
+          lineRequest.input('U_EqpCode', sql.NVarChar(50), line['Equipment Code'] || null);
+          lineRequest.input('U_EqpName', sql.NVarChar(200), line['Equipment Name'] || null);
+          lineRequest.input('U_Uom', sql.NVarChar(50), line['UOM'] || null);
+          lineRequest.input('U_StdValue', sql.NVarChar(500), line['Std Value'] || null);
+          lineRequest.input('U_MinValue', sql.NVarChar(500), line['Min Value'] || null);
+          lineRequest.input('U_MaxValue', sql.NVarChar(500), line['Max Value'] || null);
+          lineRequest.input('U_Type', sql.NVarChar(11), typeVal);
+          lineRequest.input('U_ObValue1', sql.NVarChar(500), line['Observed Value 1'] || null);
+          lineRequest.input('U_ObValue2', sql.NVarChar(500), line['Observed Value 2'] || null);
+          lineRequest.input('U_ObValue3', sql.NVarChar(500), line['Observed Value 3'] || null);
           
           const insertLineQuery = `
             INSERT INTO [DOME].[dbo].[@XD_QUL1] (

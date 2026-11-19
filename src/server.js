@@ -49,6 +49,9 @@ app.get("/api/health", (req, res) => {
 const coaTemplateRoutes = require("./routes/QC/coaTemplate.route");
 const coaReportRoutes = require("./routes/QC/coaReport.route");
 const qualityRoutes = require("./routes/QC/quality.routes");
+const policyRoutes = require("./routes/Policy/policy.route");
+const standardUnitManHoursRoutes = require("./routes/StandardUnitManHours/standardUnitManHours.route");
+const inventoryPlanningRoutes = require("./routes/InventoryPlanning/inventoryPlanning.route");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/machine-efficiency", productionRoutes);
@@ -71,6 +74,9 @@ app.use("/api/lds-dx", ldsDxRoutes);
 app.use("/api/coa-template", coaTemplateRoutes);
 app.use("/api/coa-report", coaReportRoutes);
 app.use("/api/quality", qualityRoutes);
+app.use("/api/policies", policyRoutes);
+app.use("/api/standard-unit-man-hours", standardUnitManHoursRoutes);
+app.use("/api/inventory-planning", inventoryPlanningRoutes);
 app.use(errorHandler);
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, "0.0.0.0", () => {

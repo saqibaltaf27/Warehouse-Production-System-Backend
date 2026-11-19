@@ -265,7 +265,17 @@ const getBatchExpiry = async (req, res) => {
 const getOpenProductionOrders = async (req, res) => {
   try {
     const pool = await poolPromise;
-    const query = `SELECT DocNum FROM LDS_LIVE.dbo.OWOR WHERE Status IN ('R','L') ORDER BY DocNum DESC`;
+    const query = `
+      SELECT
+        O.DocNum,
+        O.ItemCode,
+        S.ManHour
+      FROM LDS_LIVE.dbo.OWOR O
+      LEFT JOIN Dome.dbo.PMSStandardManHours S
+        ON S.ItemName COLLATE DATABASE_DEFAULT = O.ItemCode COLLATE DATABASE_DEFAULT
+      WHERE O.Status IN ('R','L')
+      ORDER BY O.DocNum DESC
+    `;
     const result = await pool.request().query(query);
     
     res.json({

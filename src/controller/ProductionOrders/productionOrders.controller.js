@@ -344,7 +344,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || '';
-    const { status, project, product, warehouse, fromDate, toDate, sortBy, sortOrder } = req.query;
+    const { status, project, product, warehouse, fromDate, toDate, sortBy, sortOrder, lifecycle } = req.query;
     const offset = (page - 1) * limit;
 
     const pool = await poolPromise;
@@ -354,7 +354,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
     const conditions = [];
 
     if (search && search.trim()) {
-      conditions.push(`(CAST(DocNum AS VARCHAR) LIKE @Search OR ItemCode LIKE @Search OR ProdName LIKE @Search OR Project LIKE @Search)`);
+      conditions.push(`(CAST(P.DocNum AS VARCHAR) LIKE @Search OR P.ItemCode LIKE @Search OR P.ProdName LIKE @Search OR P.Project LIKE @Search)`);
       request.input('Search', sql.VarChar, `%${search.trim()}%`);
       countRequest.input('Search', sql.VarChar, `%${search.trim()}%`);
     }
@@ -371,37 +371,37 @@ exports.getPaginatedProductionOrders = async (req, res) => {
         'C': 'C'
       };
       const dbStatus = statusMap[status] || status;
-      conditions.push(`Status = @Status`);
+      conditions.push(`P.Status = @Status`);
       request.input('Status', sql.VarChar, dbStatus);
       countRequest.input('Status', sql.VarChar, dbStatus);
     }
 
     if (project && project.trim()) {
-      conditions.push(`Project = @Project`);
+      conditions.push(`P.Project = @Project`);
       request.input('Project', sql.VarChar, project.trim());
       countRequest.input('Project', sql.VarChar, project.trim());
     }
 
     if (product && product.trim()) {
-      conditions.push(`ItemCode = @Product`);
+      conditions.push(`P.ItemCode = @Product`);
       request.input('Product', sql.VarChar, product.trim());
       countRequest.input('Product', sql.VarChar, product.trim());
     }
 
     if (warehouse && warehouse.trim()) {
-      conditions.push(`Warehouse = @Warehouse`);
+      conditions.push(`P.Warehouse = @Warehouse`);
       request.input('Warehouse', sql.VarChar, warehouse.trim());
       countRequest.input('Warehouse', sql.VarChar, warehouse.trim());
     }
 
     if (fromDate && fromDate.trim()) {
-      conditions.push(`DueDate >= @FromDate`);
+      conditions.push(`P.DueDate >= @FromDate`);
       request.input('FromDate', sql.VarChar, fromDate.trim());
       countRequest.input('FromDate', sql.VarChar, fromDate.trim());
     }
 
     if (toDate && toDate.trim()) {
-      conditions.push(`DueDate <= @ToDate`);
+      conditions.push(`P.DueDate <= @ToDate`);
       request.input('ToDate', sql.VarChar, toDate.trim());
       countRequest.input('ToDate', sql.VarChar, toDate.trim());
     }
@@ -409,45 +409,72 @@ exports.getPaginatedProductionOrders = async (req, res) => {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const sortColumnMap = {
-      DocNum: 'DocNum',
-      ProductNo: 'ItemCode',
-      ItemCode: 'ItemCode',
-      ProductDescription: 'ProdName',
-      ProdName: 'ProdName',
-      PlannedQty: 'PlannedQty',
-      DueDate: 'DueDate',
-      OrderDate: 'PostDate',
-      Project: 'Project',
-      Status: 'Status',
-      DocEntry: 'DocEntry'
+      DocNum: 'P.DocNum',
+      ProductNo: 'P.ItemCode',
+      ItemCode: 'P.ItemCode',
+      ProductDescription: 'P.ProdName',
+      ProdName: 'P.ProdName',
+      PlannedQty: 'P.PlannedQty',
+      DueDate: 'P.DueDate',
+      OrderDate: 'P.PostDate',
+      Project: 'P.Project',
+      Status: 'P.Status',
+      DocEntry: 'P.DocEntry',
+      ProductionLifecycleStage: 'ProductionLifecycleStage'
     };
 
-    const orderColumn = sortColumnMap[sortBy] || 'DocEntry';
+    const orderColumn = sortColumnMap[sortBy] || 'P.DocEntry';
     const orderDirection = sortOrder === 'asc' || sortOrder === 'ascending' ? 'ASC' : 'DESC';
 
+    const lifecycleSql = `
+        CASE
+            WHEN P.Status = 'P'
+                 AND EXISTS (
+                     SELECT 1
+                     FROM Dome.dbo.PmsProductionPlanning PP
+                     WHERE LTRIM(RTRIM(CAST(PP.PO AS NVARCHAR(50)))) = CAST(P.DocNum AS NVARCHAR(50))
+                 )
+                THEN 'Planned'
+            WHEN P.Status = 'P' THEN 'New Order'
+            WHEN P.Status = 'R' THEN 'In Progress'
+            WHEN P.Status = 'L' THEN 'Completed'
+            WHEN P.Status = 'C' THEN 'Cancelled'
+            ELSE 'Unknown'
+        END`;
+
+    let lifecycleWhere = whereClause;
+    if (lifecycle && String(lifecycle).trim()) {
+      request.input('Lifecycle', sql.NVarChar, String(lifecycle).trim());
+      countRequest.input('Lifecycle', sql.NVarChar, String(lifecycle).trim());
+      lifecycleWhere = lifecycleWhere
+        ? `${lifecycleWhere} AND (${lifecycleSql}) = @Lifecycle`
+        : `WHERE (${lifecycleSql}) = @Lifecycle`;
+    }
+
     const query = `
-      SELECT 
-        DocNum, 
-        ItemCode AS ProductNo, 
-        ProdName AS ProductDescription, 
-        PlannedQty, 
-        PostDate AS OrderDate, 
-        DueDate, 
-        Project, 
-        CASE Status
+      SELECT
+        P.DocNum,
+        P.ItemCode AS ProductNo,
+        P.ProdName AS ProductDescription,
+        P.PlannedQty,
+        P.PostDate AS OrderDate,
+        P.DueDate,
+        P.Project,
+        CASE P.Status
             WHEN 'P' THEN 'Planned'
             WHEN 'R' THEN 'Released'
             WHEN 'L' THEN 'Closed'
             WHEN 'C' THEN 'Cancelled'
-            ELSE Status
-        END AS Status
-      FROM LDS_LIVE.dbo.OWOR 
-      ${whereClause}
-      ORDER BY ${orderColumn} ${orderDirection} 
+            ELSE P.Status
+        END AS Status,
+        ${lifecycleSql} AS ProductionLifecycleStage
+      FROM LDS_LIVE.dbo.OWOR P
+      ${lifecycleWhere}
+      ORDER BY ${orderColumn} ${orderDirection}
       OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
     `;
 
-    const countQuery = `SELECT COUNT(*) AS total FROM LDS_LIVE.dbo.OWOR ${whereClause}`;
+    const countQuery = `SELECT COUNT(*) AS total FROM LDS_LIVE.dbo.OWOR P ${lifecycleWhere}`;
 
     request.input('Offset', sql.Int, offset);
     request.input('Limit', sql.Int, limit);

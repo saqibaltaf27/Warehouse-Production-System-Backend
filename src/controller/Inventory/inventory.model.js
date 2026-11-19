@@ -1702,7 +1702,7 @@ class InventoryModel {
                 FROM gms_live.dbo.OBTN T0
                 INNER JOIN gms_live.dbo.OBTQ T1 ON T0.ItemCode = T1.ItemCode AND T0.SysNumber = T1.SysNumber
                 LEFT JOIN gms_live.dbo.OWHS W ON T1.WhsCode = W.WhsCode
-                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0 AND T0.ExpDate IS NOT NULL
+                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0
             `);
             queries.push(`
                 SELECT 
@@ -1717,7 +1717,7 @@ class InventoryModel {
                 FROM gms_live.dbo.OSRN T0
                 INNER JOIN gms_live.dbo.OSRQ T1 ON T0.ItemCode = T1.ItemCode AND T0.SysNumber = T1.SysNumber
                 LEFT JOIN gms_live.dbo.OWHS W ON T1.WhsCode = W.WhsCode
-                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0 AND T0.ExpDate IS NOT NULL
+                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0
             `);
         }
         if (!company || company === 'LDS') {
@@ -1734,7 +1734,7 @@ class InventoryModel {
                 FROM lds_live.dbo.OBTN T0
                 INNER JOIN lds_live.dbo.OBTQ T1 ON T0.ItemCode = T1.ItemCode AND T0.SysNumber = T1.SysNumber
                 LEFT JOIN lds_live.dbo.OWHS W ON T1.WhsCode = W.WhsCode
-                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0 AND T0.ExpDate IS NOT NULL
+                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0
             `);
             queries.push(`
                 SELECT 
@@ -1749,7 +1749,7 @@ class InventoryModel {
                 FROM lds_live.dbo.OSRN T0
                 INNER JOIN lds_live.dbo.OSRQ T1 ON T0.ItemCode = T1.ItemCode AND T0.SysNumber = T1.SysNumber
                 LEFT JOIN lds_live.dbo.OWHS W ON T1.WhsCode = W.WhsCode
-                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0 AND T0.ExpDate IS NOT NULL
+                WHERE T0.ItemCode = @itemCode AND T1.Quantity > 0
             `);
         }
 
