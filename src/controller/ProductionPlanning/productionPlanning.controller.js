@@ -269,8 +269,12 @@ const getOpenProductionOrders = async (req, res) => {
       SELECT
         O.DocNum,
         O.ItemCode,
+        ISNULL(I.ItemName, O.ProdName) AS ItemName,
+        ISNULL(I.FrgnName, '') AS ItemDescription,
         S.ManHour
       FROM LDS_LIVE.dbo.OWOR O
+      LEFT JOIN LDS_LIVE.dbo.OITM I
+        ON I.ItemCode = O.ItemCode
       LEFT JOIN Dome.dbo.PMSStandardManHours S
         ON S.ItemName COLLATE DATABASE_DEFAULT = O.ItemCode COLLATE DATABASE_DEFAULT
       WHERE O.Status IN ('R','L')

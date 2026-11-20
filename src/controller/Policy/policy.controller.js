@@ -24,6 +24,7 @@ exports.listPolicies = async (req, res) => {
         P.Id,
         P.Title,
         P.Department,
+        P.Domain,
         P.[File] AS FilePath,
         P.CreatedBy,
         ISNULL(E.FirstName, CAST(P.CreatedBy AS NVARCHAR(50))) AS CreatedByName,
@@ -45,6 +46,8 @@ exports.createPolicy = async (req, res) => {
   try {
     const title = String(req.body?.title || '').trim();
     const department = String(req.body?.department || '').trim();
+    const domain = String(req.body?.domain || '').trim();
+    const allowedDomains = ['Procedure', 'Standards', 'Template'];
     const createdBy = getCreatedBy(req); // from JWT empId
     const file = req.file;
 
@@ -53,6 +56,9 @@ exports.createPolicy = async (req, res) => {
     }
     if (!department) {
       return res.status(400).json({ success: false, message: 'Department is required' });
+    }
+    if (!allowedDomains.includes(domain)) {
+      return res.status(400).json({ success: false, message: 'Document Domain is required' });
     }
     if (!createdBy) {
       return res.status(400).json({ success: false, message: 'CreatedBy (logged-in empId) is required' });
@@ -77,12 +83,13 @@ exports.createPolicy = async (req, res) => {
     insert.input('Id', sql.Int, nextId);
     insert.input('Title', sql.NVarChar(500), title);
     insert.input('Department', sql.NVarChar(200), department);
+    insert.input('Domain', sql.NVarChar(255), domain);
     insert.input('File', sql.NVarChar(sql.MAX), filePath);
     insert.input('CreatedBy', sql.Int, createdBy);
 
     await insert.query(`
-      INSERT INTO Dome.dbo.PMSPolicy (Id, Title, Department, [File], CreatedBy, CreatedAt)
-      VALUES (@Id, @Title, @Department, @File, @CreatedBy, GETDATE())
+      INSERT INTO Dome.dbo.PMSPolicy (Id, Title, Department, Domain, [File], CreatedBy, CreatedAt)
+      VALUES (@Id, @Title, @Department, @Domain, @File, @CreatedBy, GETDATE())
     `);
 
     res.status(201).json({
@@ -92,6 +99,7 @@ exports.createPolicy = async (req, res) => {
         Id: nextId,
         Title: title,
         Department: department,
+        Domain: domain,
         FilePath: filePath,
         CreatedBy: createdBy,
       },
