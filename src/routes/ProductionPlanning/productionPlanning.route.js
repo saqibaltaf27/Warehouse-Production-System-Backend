@@ -15,7 +15,12 @@ const {
     getMachineEfficiency,
     getPlannedReleasedOrders,
     getTodayWorkingPlans,
-    getMonthWorkingPos
+    getMonthWorkingPos,
+    getStaffGroups,
+    createStaffGroup,
+    createLineClearanceRequest,
+    listLineClearanceRequests,
+    updateLineClearanceRequest
 } = require('../../controller/ProductionPlanning/productionPlanning.controller');
 const {
     getProductHistory,
@@ -36,8 +41,13 @@ router.get('/today-working-plans', getTodayWorkingPlans);
 router.get('/month-working-pos', getMonthWorkingPos);
 
 // Production Plan Routes
+router.get('/staff-groups', getStaffGroups);
+router.post('/staff-groups', createStaffGroup);
 router.get('/plans', getProductionPlans);
 router.post('/plan', createProductionPlan);
+router.get('/line-clearance', listLineClearanceRequests);
+router.post('/line-clearance', createLineClearanceRequest);
+router.patch('/line-clearance/:requestId', updateLineClearanceRequest);
 router.put('/plan/:id', updateProductionPlan);
 
 // Man Efficiency Routes

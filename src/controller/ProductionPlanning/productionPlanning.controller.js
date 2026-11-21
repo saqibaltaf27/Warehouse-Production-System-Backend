@@ -301,9 +301,17 @@ const getProductionPlans = async (req, res) => {
         p.Shift, p.PlannedManpower, p.ActualManpower, p.WorkingHours, p.ProductionQty, 
         p.TotalManHour, p.UnitsPerManHour, p.StdUnitsPerManHour, p.PrdPercentage, p.Remarks,
         ISNULL(o.PlannedQty, 0) AS PlannedQty,
-        ISNULL(o.CmpltQty, 0) AS CmpltQty
+        ISNULL(o.CmpltQty, 0) AS CmpltQty,
+        ISNULL(o.ProdName, '') AS ProductName,
+        ISNULL(LC.Status, N'Plan') AS ClearanceStatus
       FROM Dome.dbo.PmsProductionPlanning p
       LEFT JOIN LDS_LIVE.dbo.OWOR o ON p.PO = CAST(o.DocNum AS NVARCHAR(100))
+      OUTER APPLY (
+        SELECT TOP 1 R.Status
+        FROM Dome.dbo.PMSLineClearanceRequest R
+        WHERE R.PlanId = p.Id
+        ORDER BY R.RequestId DESC
+      ) LC
       ORDER BY p.CreatedAt DESC
     `;
     const result = await pool.request().query(query);
@@ -1000,6 +1008,201 @@ const getMonthWorkingPos = async (req, res) => {
   }
 };
 
+const getStaffGroups = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT
+        G.GroupID,
+        G.GroupName,
+        M.StaffID
+      FROM Dome.dbo.PMSStaffGroup G
+      LEFT JOIN Dome.dbo.PMSStaffGroupMember M ON M.GroupID = G.GroupID
+      ORDER BY G.GroupName, M.StaffID
+    `);
+    const groups = [];
+    const byId = new Map();
+    result.recordset.forEach((row) => {
+      if (!byId.has(row.GroupID)) {
+        const group = { GroupID: row.GroupID, GroupName: row.GroupName, StaffIDs: [] };
+        byId.set(row.GroupID, group);
+        groups.push(group);
+      }
+      if (row.StaffID != null) byId.get(row.GroupID).StaffIDs.push(row.StaffID);
+    });
+    res.json({ success: true, data: groups });
+  } catch (error) {
+    console.error('Error in getStaffGroups:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch staff groups' });
+  }
+};
+
+const createStaffGroup = async (req, res) => {
+  try {
+    const groupName = String(req.body?.groupName || '').trim();
+    const staffIds = [...new Set((req.body?.staffIds || []).map((id) => parseInt(id, 10)).filter((id) => Number.isInteger(id)))];
+    if (!groupName) {
+      return res.status(400).json({ success: false, message: 'Group name is required' });
+    }
+    if (!staffIds.length) {
+      return res.status(400).json({ success: false, message: 'Select at least one employee' });
+    }
+
+    const pool = await poolPromise;
+    const existing = await pool.request()
+      .input('GroupName', sql.NVarChar(200), groupName)
+      .query(`
+        SELECT GroupID
+        FROM Dome.dbo.PMSStaffGroup
+        WHERE LOWER(LTRIM(RTRIM(GroupName))) = LOWER(LTRIM(RTRIM(@GroupName)))
+      `);
+    if (existing.recordset.length) {
+      return res.status(400).json({ success: false, message: 'A group with this name already exists' });
+    }
+
+    const transaction = new sql.Transaction(pool);
+    await transaction.begin();
+    try {
+      const next = await new sql.Request(transaction).query(`
+        SELECT ISNULL(MAX(GroupID), 0) + 1 AS GroupID FROM Dome.dbo.PMSStaffGroup
+      `);
+      const groupId = next.recordset[0].GroupID;
+      await new sql.Request(transaction)
+        .input('GroupID', sql.Int, groupId)
+        .input('GroupName', sql.NVarChar(200), groupName)
+        .query(`
+          INSERT INTO Dome.dbo.PMSStaffGroup (GroupID, GroupName, CreatedAt)
+          VALUES (@GroupID, @GroupName, GETDATE())
+        `);
+      for (const staffId of staffIds) {
+        await new sql.Request(transaction)
+          .input('GroupID', sql.Int, groupId)
+          .input('StaffID', sql.Int, staffId)
+          .query(`
+            INSERT INTO Dome.dbo.PMSStaffGroupMember (GroupID, StaffID)
+            VALUES (@GroupID, @StaffID)
+          `);
+      }
+      await transaction.commit();
+      res.status(201).json({ success: true, data: { GroupID: groupId, GroupName: groupName, StaffIDs: staffIds } });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
+  } catch (error) {
+    console.error('Error in createStaffGroup:', error);
+    res.status(500).json({ success: false, message: 'Failed to create staff group' });
+  }
+};
+
+const listLineClearanceRequests = async (_req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT
+        R.RequestId,
+        R.PlanId,
+        R.RequestType,
+        R.Area,
+        R.Status,
+        R.CreatedAt,
+        P.PO,
+        ISNULL(O.ProdName, '') AS ProductName
+      FROM Dome.dbo.PMSLineClearanceRequest R
+      LEFT JOIN Dome.dbo.PmsProductionPlanning P ON P.Id = R.PlanId
+      LEFT JOIN LDS_LIVE.dbo.OWOR O ON P.PO = CAST(O.DocNum AS NVARCHAR(100))
+      ORDER BY R.RequestId DESC
+    `);
+    res.json({ success: true, data: result.recordset || [] });
+  } catch (error) {
+    console.error('Error in listLineClearanceRequests:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch line clearance requests' });
+  }
+};
+
+const updateLineClearanceRequest = async (req, res) => {
+  try {
+    const requestId = parseInt(req.params.requestId, 10);
+    const status = String(req.body?.status || '').trim();
+    const allowed = ['Hold', 'Grant Permission', 'Reject'];
+    const approvedBy = parseInt(req.user?.empId || req.user?.userId || req.body?.approvedBy, 10);
+
+    if (!requestId || !allowed.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Status must be Hold, Grant Permission, or Reject' });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input('RequestId', sql.Int, requestId)
+      .input('Status', sql.NVarChar(30), status)
+      .input('ApprovedBy', sql.Int, Number.isInteger(approvedBy) ? approvedBy : null)
+      .query(`
+        UPDATE Dome.dbo.PMSLineClearanceRequest
+        SET Status = @Status,
+            ApprovedBy = @ApprovedBy,
+            ApprovedAt = GETDATE()
+        WHERE RequestId = @RequestId
+      `);
+
+    if (!result.rowsAffected?.[0]) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+
+    res.json({ success: true, message: `Status updated to ${status}`, data: { RequestId: requestId, Status: status } });
+  } catch (error) {
+    console.error('Error in updateLineClearanceRequest:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to update line clearance' });
+  }
+};
+
+const createLineClearanceRequest = async (req, res) => {
+  try {
+    const planId = parseInt(req.body?.planId, 10);
+    const requestType = String(req.body?.requestType || '').trim();
+    const area = String(req.body?.area || '').trim();
+    const allowedTypes = ['Raw Material', 'Primary Packaging', 'Production', 'Final Packaging'];
+    const allowedAreas = ['Clean Room 1', 'Clean Room 2', 'Raw Material WH', 'Other'];
+    const createdBy = parseInt(req.user?.empId || req.user?.userId || req.body?.createdBy, 10);
+
+    if (!planId) {
+      return res.status(400).json({ success: false, message: 'Plan id is required' });
+    }
+    if (!allowedTypes.includes(requestType) || !allowedAreas.includes(area)) {
+      return res.status(400).json({ success: false, message: 'Type and area are required' });
+    }
+
+    const pool = await poolPromise;
+    const next = await pool.request().query(`
+      SELECT ISNULL(MAX(RequestId), 0) + 1 AS RequestId
+      FROM Dome.dbo.PMSLineClearanceRequest
+    `);
+    const requestId = next.recordset[0].RequestId;
+
+    await pool.request()
+      .input('RequestId', sql.Int, requestId)
+      .input('PlanId', sql.Int, planId)
+      .input('RequestType', sql.NVarChar(50), requestType)
+      .input('Area', sql.NVarChar(50), area)
+      .input('Status', sql.NVarChar(30), 'Requested')
+      .input('CreatedBy', sql.Int, Number.isInteger(createdBy) ? createdBy : null)
+      .query(`
+        INSERT INTO Dome.dbo.PMSLineClearanceRequest
+          (RequestId, PlanId, RequestType, Area, Status, CreatedBy, ApprovedBy, ApprovedAt, CreatedAt)
+        VALUES
+          (@RequestId, @PlanId, @RequestType, @Area, @Status, @CreatedBy, NULL, NULL, GETDATE())
+      `);
+
+    res.status(201).json({
+      success: true,
+      message: 'Line clearance requested',
+      data: { RequestId: requestId, PlanId: planId, Status: 'Requested' },
+    });
+  } catch (error) {
+    console.error('Error in createLineClearanceRequest:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to save line clearance request' });
+  }
+};
+
 module.exports = {
   getExecutiveKPIs,
   getMaterialShortages,
@@ -1015,6 +1218,11 @@ module.exports = {
   getMachineEfficiency,
   getPlannedReleasedOrders,
   getTodayWorkingPlans,
-  getMonthWorkingPos
+  getMonthWorkingPos,
+  getStaffGroups,
+  createStaffGroup,
+  createLineClearanceRequest,
+  listLineClearanceRequests,
+  updateLineClearanceRequest
 };
 

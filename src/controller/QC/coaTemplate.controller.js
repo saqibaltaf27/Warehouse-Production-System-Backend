@@ -103,8 +103,36 @@ const getAllCOATemplates = async (req, res) => {
   }
 };
 
+const getCOATemplateByLine = async (req, res) => {
+  try {
+    const line = String(req.query.line || '').trim();
+    if (!line) {
+      return res.status(400).json({ success: false, message: 'Product line is required' });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input('Line', line)
+      .query(`
+        SELECT TOP 1 Line, Description, Header, Footer
+        FROM Dome.dbo.PMSCOATemplate
+        WHERE LOWER(LTRIM(RTRIM(Line))) = LOWER(LTRIM(RTRIM(@Line)))
+      `);
+
+    if (!result.recordset.length) {
+      return res.json({ success: false, message: 'No template found for this product line' });
+    }
+
+    res.json({ success: true, data: result.recordset[0] });
+  } catch (error) {
+    console.error('Error fetching COA template by line:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch COA template' });
+  }
+};
+
 module.exports = {
   saveCOATemplate,
   getCOATemplate,
+  getCOATemplateByLine,
   getAllCOATemplates
 };

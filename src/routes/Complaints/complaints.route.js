@@ -9,6 +9,7 @@ router.get("/lookup/items", authMiddleware, complaintsController.lookupItems);
 // ── Complaints ──────────────────────────────────
 router.post("/", authMiddleware, complaintsController.createComplaint);
 router.get("/", authMiddleware, complaintsController.getAllComplaints);
+router.get("/trend", authMiddleware, complaintsController.getComplaintTrend);
 router.put("/:complaintNumber", authMiddleware, complaintsController.updateComplaint);
 
 // ── COA ─────────────────────────────────────────

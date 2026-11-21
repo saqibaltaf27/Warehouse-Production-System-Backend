@@ -344,7 +344,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || '';
-    const { status, project, product, warehouse, fromDate, toDate, sortBy, sortOrder, lifecycle } = req.query;
+    const { status, project, product, warehouse, fromDate, toDate, createdFrom, createdTo, sortBy, sortOrder, lifecycle, productLine } = req.query;
     const offset = (page - 1) * limit;
 
     const pool = await poolPromise;
@@ -388,6 +388,12 @@ exports.getPaginatedProductionOrders = async (req, res) => {
       countRequest.input('Product', sql.VarChar, product.trim());
     }
 
+    if (productLine && productLine.trim()) {
+      conditions.push(`LTRIM(RTRIM(I.U_PROd_LINE)) = @ProductLine`);
+      request.input('ProductLine', sql.NVarChar, productLine.trim());
+      countRequest.input('ProductLine', sql.NVarChar, productLine.trim());
+    }
+
     if (warehouse && warehouse.trim()) {
       conditions.push(`P.Warehouse = @Warehouse`);
       request.input('Warehouse', sql.VarChar, warehouse.trim());
@@ -404,6 +410,18 @@ exports.getPaginatedProductionOrders = async (req, res) => {
       conditions.push(`P.DueDate <= @ToDate`);
       request.input('ToDate', sql.VarChar, toDate.trim());
       countRequest.input('ToDate', sql.VarChar, toDate.trim());
+    }
+
+    if (createdFrom && createdFrom.trim()) {
+      conditions.push(`CAST(P.CreateDate AS DATE) >= @CreatedFrom`);
+      request.input('CreatedFrom', sql.VarChar, createdFrom.trim());
+      countRequest.input('CreatedFrom', sql.VarChar, createdFrom.trim());
+    }
+
+    if (createdTo && createdTo.trim()) {
+      conditions.push(`CAST(P.CreateDate AS DATE) <= @CreatedTo`);
+      request.input('CreatedTo', sql.VarChar, createdTo.trim());
+      countRequest.input('CreatedTo', sql.VarChar, createdTo.trim());
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -458,6 +476,7 @@ exports.getPaginatedProductionOrders = async (req, res) => {
         P.ProdName AS ProductDescription,
         P.PlannedQty,
         P.PostDate AS OrderDate,
+        P.CreateDate,
         P.DueDate,
         P.Project,
         CASE P.Status
@@ -469,25 +488,41 @@ exports.getPaginatedProductionOrders = async (req, res) => {
         END AS Status,
         ${lifecycleSql} AS ProductionLifecycleStage
       FROM LDS_LIVE.dbo.OWOR P
+      LEFT JOIN LDS_LIVE.dbo.OITM I ON I.ItemCode = P.ItemCode
       ${lifecycleWhere}
       ORDER BY ${orderColumn} ${orderDirection}
       OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
     `;
 
-    const countQuery = `SELECT COUNT(*) AS total FROM LDS_LIVE.dbo.OWOR P ${lifecycleWhere}`;
+    const countQuery = `
+      SELECT COUNT(*) AS total
+      FROM LDS_LIVE.dbo.OWOR P
+      LEFT JOIN LDS_LIVE.dbo.OITM I ON I.ItemCode = P.ItemCode
+      ${lifecycleWhere}
+    `;
+    const linesQuery = `
+      SELECT DISTINCT LTRIM(RTRIM(I.U_PROd_LINE)) AS ProductLine
+      FROM LDS_LIVE.dbo.OWOR P
+      INNER JOIN LDS_LIVE.dbo.OITM I ON I.ItemCode = P.ItemCode
+      WHERE I.U_PROd_LINE IS NOT NULL
+        AND LTRIM(RTRIM(I.U_PROd_LINE)) <> ''
+      ORDER BY ProductLine
+    `;
 
     request.input('Offset', sql.Int, offset);
     request.input('Limit', sql.Int, limit);
 
-    const [dataResult, countResult] = await Promise.all([
+    const [dataResult, countResult, linesResult] = await Promise.all([
       request.query(query),
-      countRequest.query(countQuery)
+      countRequest.query(countQuery),
+      pool.request().query(linesQuery)
     ]);
 
     res.status(200).json({
       success: true,
       data: dataResult.recordset,
-      total: countResult.recordset[0].total
+      total: countResult.recordset[0].total,
+      productLines: (linesResult.recordset || []).map((row) => row.ProductLine)
     });
   } catch (error) {
     console.error("Error fetching paginated production orders:", error);

@@ -117,16 +117,60 @@ class ComplaintsModel {
 
     static async getAllComplaints(pagination) {
         const pool = await poolPromise;
-        const request = pool.request();
-        
-        request.input('limit', sql.Int, pagination.limit);
-        request.input('offset', sql.Int, pagination.offset);
+        const filters = pagination || {};
 
-        // Fetch total count
-        const countResult = await request.query(`SELECT COUNT(*) AS Total FROM Dome.dbo.PMSComplaints`);
+        const bindFilters = (request) => {
+            if (filters.search && String(filters.search).trim()) {
+                request.input('search', sql.NVarChar, `%${String(filters.search).trim()}%`);
+            }
+            if (filters.department && String(filters.department).trim()) {
+                request.input('department', sql.NVarChar, String(filters.department).trim());
+            }
+            if (filters.productCategory && String(filters.productCategory).trim()) {
+                request.input('productCategory', sql.NVarChar, String(filters.productCategory).trim());
+            }
+            if (filters.fromDate && String(filters.fromDate).trim()) {
+                request.input('fromDate', sql.VarChar, String(filters.fromDate).trim());
+            }
+            if (filters.toDate && String(filters.toDate).trim()) {
+                request.input('toDate', sql.VarChar, String(filters.toDate).trim());
+            }
+        };
+
+        const conditions = [];
+        if (filters.search && String(filters.search).trim()) {
+            conditions.push(`(
+                ComplaintNumber LIKE @search
+                OR Product LIKE @search
+                OR ComplaintBy LIKE @search
+                OR BatchNumber LIKE @search
+                OR BriefDescription LIKE @search
+            )`);
+        }
+        if (filters.department && String(filters.department).trim()) {
+            conditions.push(`Department = @department`);
+        }
+        if (filters.productCategory && String(filters.productCategory).trim()) {
+            conditions.push(`ProductCategory = @productCategory`);
+        }
+        if (filters.fromDate && String(filters.fromDate).trim()) {
+            conditions.push(`CAST(ReportDate AS DATE) >= @fromDate`);
+        }
+        if (filters.toDate && String(filters.toDate).trim()) {
+            conditions.push(`CAST(ReportDate AS DATE) <= @toDate`);
+        }
+        const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+        const countRequest = pool.request();
+        bindFilters(countRequest);
+        const countResult = await countRequest.query(`SELECT COUNT(*) AS Total FROM Dome.dbo.PMSComplaints ${whereSql}`);
         const total = countResult.recordset[0].Total;
 
-        // Fetch paginated data
+        const request = pool.request();
+        bindFilters(request);
+        request.input('limit', sql.Int, filters.limit);
+        request.input('offset', sql.Int, filters.offset);
+
         const result = await request.query(`
             SELECT 
                 ComplaintNumber AS complaintNumber,
@@ -153,13 +197,23 @@ class ComplaintsModel {
                 ClosingDate AS closingDate,
                 CumulativeFrequency AS cumulativeFrequency
             FROM Dome.dbo.PMSComplaints
+            ${whereSql}
             ORDER BY Id DESC
             OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;
         `);
 
+        const optionsResult = await pool.request().query(`
+            SELECT DISTINCT Department AS department, ProductCategory AS productCategory
+            FROM Dome.dbo.PMSComplaints
+        `);
+        const departments = [...new Set((optionsResult.recordset || []).map((row) => row.department).filter(Boolean))].sort();
+        const productCategories = [...new Set((optionsResult.recordset || []).map((row) => row.productCategory).filter(Boolean))].sort();
+
         return {
             total,
-            data: result.recordset || []
+            data: result.recordset || [],
+            departments,
+            productCategories,
         };
     }
 
@@ -319,6 +373,26 @@ class ComplaintsModel {
             await transaction.rollback();
             throw error;
         }
+    }
+
+    static async getComplaintTrend() {
+        const pool = await poolPromise;
+        const result = await pool.request().query(`
+            SELECT
+                ISNULL(NULLIF(LTRIM(RTRIM(C.Product)), ''), 'Unknown') AS product,
+                ISNULL(I.ItemName, '') AS itemName,
+                ISNULL(I.FrgnName, '') AS itemDescription,
+                COUNT(*) AS total
+            FROM Dome.dbo.PMSComplaints C
+            LEFT JOIN LDS_LIVE.dbo.OITM I
+                ON I.ItemCode COLLATE DATABASE_DEFAULT = C.Product COLLATE DATABASE_DEFAULT
+            GROUP BY
+                ISNULL(NULLIF(LTRIM(RTRIM(C.Product)), ''), 'Unknown'),
+                ISNULL(I.ItemName, ''),
+                ISNULL(I.FrgnName, '')
+            ORDER BY total DESC
+        `);
+        return result.recordset || [];
     }
 
     static async getCOAProductDetails(itemCode) {

@@ -41,12 +41,30 @@ class ComplaintsController {
             const limit = parseInt(req.query.limit, 10) || 10;
             const offset = (page - 1) * limit;
 
-            const result = await complaintsModel.getAllComplaints({ limit, offset });
+            const result = await complaintsModel.getAllComplaints({
+                limit,
+                offset,
+                search: req.query.search,
+                department: req.query.department,
+                productCategory: req.query.productCategory,
+                fromDate: req.query.fromDate,
+                toDate: req.query.toDate,
+            });
             
             sendSuccess(res, result, "Complaints fetched successfully");
         } catch (err) {
             console.error("Error fetching complaints:", err);
             sendError(res, "Failed to fetch complaints", 500);
+        }
+    }
+
+    static async getComplaintTrend(req, res) {
+        try {
+            const rows = await complaintsModel.getComplaintTrend();
+            sendSuccess(res, rows, "Complaint trend fetched successfully");
+        } catch (err) {
+            console.error("Error fetching complaint trend:", err);
+            sendError(res, "Failed to fetch complaint trend", 500);
         }
     }
 

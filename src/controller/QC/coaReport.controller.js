@@ -71,13 +71,72 @@ const listCOAReports = async (req, res) => {
     const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 20));
     const offset = (page - 1) * limit;
 
+    const search = (req.query.search || '').trim();
+    const status = (req.query.status || '').trim();
+    const productLine = (req.query.productLine || '').trim();
+    const fromDate = (req.query.fromDate || '').trim();
+    const toDate = (req.query.toDate || '').trim();
+    const excludeStatus = (req.query.excludeStatus || '').trim();
+    const statusIn = String(req.query.statusIn || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const conditions = [];
+
+    const bindFilters = (request) => {
+      if (search) {
+        request.input('Search', sql.NVarChar, `%${search}%`);
+        conditions.push(`(
+          CAST(H.COA_No AS NVARCHAR(20)) LIKE @Search
+          OR H.ItemCode LIKE @Search
+          OR H.ItemName LIKE @Search
+          OR H.BatchNo LIKE @Search
+          OR H.CreatedByName LIKE @Search
+        )`);
+      }
+      if (status) {
+        request.input('Status', sql.NVarChar, status);
+        conditions.push(`H.Status = @Status`);
+      } else if (statusIn.length) {
+        const names = statusIn.map((item, index) => {
+          const key = `StatusIn${index}`;
+          request.input(key, sql.NVarChar, item);
+          return `@${key}`;
+        });
+        conditions.push(`H.Status IN (${names.join(', ')})`);
+      }
+      if (productLine) {
+        request.input('ProductLine', sql.NVarChar, productLine);
+        conditions.push(`LTRIM(RTRIM(H.ProductLine)) = @ProductLine`);
+      }
+      if (fromDate) {
+        request.input('FromDate', sql.VarChar, fromDate);
+        conditions.push(`CAST(H.CreatedAt AS DATE) >= @FromDate`);
+      }
+      if (toDate) {
+        request.input('ToDate', sql.VarChar, toDate);
+        conditions.push(`CAST(H.CreatedAt AS DATE) <= @ToDate`);
+      }
+      if (excludeStatus) {
+        request.input('ExcludeStatus', sql.NVarChar, excludeStatus);
+        conditions.push(`H.Status <> @ExcludeStatus`);
+      }
+    };
+
     const pool = await poolPromise;
-    const countResult = await pool.request().query(`
-      SELECT COUNT(1) AS Total FROM DOME.dbo.PMSCOAReport
+    const countRequest = pool.request();
+    bindFilters(countRequest);
+    const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const countResult = await countRequest.query(`
+      SELECT COUNT(1) AS Total FROM DOME.dbo.PMSCOAReport H ${whereSql}
     `);
     const total = countResult.recordset[0]?.Total || 0;
 
-    const result = await pool.request()
+    const dataRequest = pool.request();
+    conditions.length = 0;
+    bindFilters(dataRequest);
+    const dataWhere = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await dataRequest
       .input('Offset', sql.Int, offset)
       .input('Limit', sql.Int, limit)
       .query(`
@@ -101,13 +160,23 @@ const listCOAReports = async (req, res) => {
           H.UpdatedAt,
           H.GeneratedAt
         FROM DOME.dbo.PMSCOAReport H
+        ${dataWhere}
         ORDER BY H.COA_No DESC
         OFFSET @Offset ROWS FETCH NEXT @Limit ROWS ONLY
       `);
 
+    const optionsResult = await pool.request().query(`
+      SELECT DISTINCT LTRIM(RTRIM(ProductLine)) AS ProductLine, Status
+      FROM DOME.dbo.PMSCOAReport
+    `);
+    const productLines = [...new Set((optionsResult.recordset || []).map((row) => row.ProductLine).filter(Boolean))].sort();
+    const statuses = [...new Set((optionsResult.recordset || []).map((row) => row.Status).filter(Boolean))].sort();
+
     res.json({
       success: true,
       data: result.recordset,
+      productLines,
+      statuses,
       pagination: {
         total,
         page,
@@ -192,7 +261,7 @@ const saveCOAReport = async (req, res) => {
 
   try {
     const body = req.body || {};
-    const status = body.status === 'Generated' ? 'Generated' : 'Draft';
+    const status = body.status === 'Generated' || body.status === 'Pending' ? 'Pending' : 'Draft';
     const coaNoInput = body.coaNo ? parseInt(body.coaNo, 10) : null;
     const tests = Array.isArray(body.tests) ? body.tests : [];
     const userId = body.createdBy || body.updatedBy || 0;
@@ -257,7 +326,7 @@ const saveCOAReport = async (req, res) => {
           UpdatedBy = @UpdatedBy,
           UpdatedByName = @UpdatedByName,
           UpdatedAt = GETDATE(),
-          GeneratedAt = CASE WHEN @Status = 'Generated' THEN ISNULL(GeneratedAt, GETDATE()) ELSE GeneratedAt END
+          GeneratedAt = CASE WHEN @Status = 'Pending' THEN ISNULL(GeneratedAt, GETDATE()) ELSE GeneratedAt END
         WHERE COA_No = @COA_No
       `);
     } else {
@@ -294,7 +363,7 @@ const saveCOAReport = async (req, res) => {
           @CheckedByName, @CheckedByTitle, @CheckedByDate,
           @ApprovedByName, @ApprovedByTitle, @ApprovedByDate,
           @CreatedBy, @CreatedByName, GETDATE(), @UpdatedBy, @UpdatedByName, GETDATE(),
-          CASE WHEN @Status = 'Generated' THEN GETDATE() ELSE NULL END
+          CASE WHEN @Status = 'Pending' THEN GETDATE() ELSE NULL END
         )
       `);
     }
@@ -304,7 +373,7 @@ const saveCOAReport = async (req, res) => {
 
     res.status(isUpdate ? 200 : 201).json({
       success: true,
-      message: status === 'Generated' ? 'COA report generated successfully' : 'COA draft saved successfully',
+      message: status === 'Pending' ? 'COA report generated successfully' : 'COA draft saved successfully',
       data: { coaNo, status }
     });
   } catch (error) {
@@ -314,9 +383,46 @@ const saveCOAReport = async (req, res) => {
   }
 };
 
+const updateCOAStatus = async (req, res) => {
+  try {
+    const coaNo = parseInt(req.params.coaNo, 10);
+    const status = String(req.body?.status || '').trim();
+    const allowed = ['Released', 'Hold', 'Reject'];
+    if (!coaNo || !allowed.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Status must be Released, Hold, or Reject' });
+    }
+
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .input('COA_No', sql.Int, coaNo)
+      .input('Status', sql.NVarChar(30), status)
+      .input('UpdatedBy', sql.Int, req.body?.updatedBy || 0)
+      .input('UpdatedByName', sql.NVarChar(100), req.body?.updatedByName || null)
+      .query(`
+        UPDATE DOME.dbo.PMSCOAReport
+        SET Status = @Status,
+            UpdatedBy = @UpdatedBy,
+            UpdatedByName = @UpdatedByName,
+            UpdatedAt = GETDATE()
+        WHERE COA_No = @COA_No
+          AND Status <> 'Draft'
+      `);
+
+    if (!result.rowsAffected?.[0]) {
+      return res.status(404).json({ success: false, message: 'Certificate not found or still a draft' });
+    }
+
+    res.json({ success: true, message: `Status updated to ${status}`, data: { coaNo, status } });
+  } catch (error) {
+    console.error('Error updating COA status:', error);
+    res.status(500).json({ success: false, message: 'Failed to update COA status' });
+  }
+};
+
 module.exports = {
   listCOAReports,
   getUsedBatches,
   getCOAReport,
-  saveCOAReport
+  saveCOAReport,
+  updateCOAStatus
 };
