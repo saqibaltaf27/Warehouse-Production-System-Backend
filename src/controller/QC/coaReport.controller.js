@@ -1,38 +1,112 @@
 const { sql, poolPromise } = require('../../database/connection');
 
-const mapHeader = (body, status) => ({
-  DocNum: body.docNum ?? null,
-  Status: status,
-  FormNo: body.formNo || null,
-  IssueDate: body.issueDate || null,
-  ItemCode: body.itemCode || null,
-  ItemName: body.itemName || null,
-  ProductTop: body.productTop || null,
-  ProductLine: body.productLine || null,
-  Composition: body.composition || null,
-  Product: body.product || null,
-  CatNo: body.catNo || null,
-  BatchNo: body.batchNo || body.batch || null,
-  PackSize: body.packSize || null,
-  BatchSize: body.batchSize || null,
-  MfgDate: body.mfgDate || null,
-  ExpDate: body.expDate || null,
-  SopNo: body.sopNo || null,
-  ProcessStage: body.processStage || null,
-  RevisionNo: body.revisionNo || null,
-  RegNo: body.regNo || body.reg || null,
-  DateReported: body.dateReported || null,
-  Remarks: body.remarks || null,
-  AnalyzedByName: body.analyzedBy?.name || body.analyzedByName || null,
-  AnalyzedByTitle: body.analyzedBy?.title || body.analyzedByTitle || null,
-  AnalyzedByDate: body.analyzedBy?.date || body.analyzedByDate || null,
-  CheckedByName: body.checkedBy?.name || body.checkedByName || null,
-  CheckedByTitle: body.checkedBy?.title || body.checkedByTitle || null,
-  CheckedByDate: body.checkedBy?.date || body.checkedByDate || null,
-  ApprovedByName: body.approvedBy?.name || body.approvedByName || null,
-  ApprovedByTitle: body.approvedBy?.title || body.approvedByTitle || null,
-  ApprovedByDate: body.approvedBy?.date || body.approvedByDate || null,
+const parseJson = (value, fallback) => {
+  if (value == null || value === '') return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const personJson = (value, name, title, date) => JSON.stringify({
+  name: value?.name || name || null,
+  title: value?.title || title || null,
+  date: value?.date || date || null,
 });
+
+const mapHeader = (body, status) => {
+  let extras = {};
+  if (typeof body.formNo === 'string') extras = parseJson(body.formNo, {});
+  return {
+    Status: status,
+    Header: JSON.stringify({
+      docNum: body.docNum ?? null,
+      formNo: body.formNo || null,
+      issueDate: body.issueDate || null,
+      itemCode: body.itemCode || null,
+      itemName: body.itemName || null,
+      productTop: body.productTop || null,
+      productLine: body.productLine || null,
+      composition: body.composition || null,
+      product: body.product || null,
+      catNo: body.catNo || null,
+      batchNo: body.batchNo || body.batch || null,
+      packSize: body.packSize || null,
+      batchSize: body.batchSize || null,
+      mfgDate: body.mfgDate || null,
+      expDate: body.expDate || null,
+      sopNo: body.sopNo || null,
+      processStage: body.processStage || null,
+      revisionNo: body.revisionNo || null,
+      regNo: body.regNo || body.reg || null,
+      dateReported: body.dateReported || null,
+    }),
+    Tests: JSON.stringify(Array.isArray(body.tests) ? body.tests.map((t, i) => ({
+      LineId: i + 1,
+      Tests: t.tests || t.test || t.Tests || null,
+      Specifications: t.specifications || t.specification || t.Specifications || null,
+      AnalyzedBy: t.analyzedBy || t.AnalyzedBy || null,
+      Result: t.result || t.Result || null,
+      Conclusion: t.conclusion || t.Conclusion || null,
+    })) : []),
+    StatementOfConformity: extras.conformity || body.conformity || null,
+    Remarks: body.remarks || null,
+    AnalyzedBy: personJson(body.analyzedBy, body.analyzedByName, body.analyzedByTitle, body.analyzedByDate),
+    CheckedBy: personJson(body.checkedBy, body.checkedByName, body.checkedByTitle, body.checkedByDate),
+    ApprovedBy: personJson(body.approvedBy, body.approvedByName, body.approvedByTitle, body.approvedByDate),
+  };
+};
+
+const expandReport = (row) => {
+  const header = parseJson(row.Header, {});
+  const analyzed = parseJson(row.AnalyzedBy, {});
+  const checked = parseJson(row.CheckedBy, {});
+  const approved = parseJson(row.ApprovedBy, {});
+  return {
+    COA_No: row.COA_No,
+    Status: row.Status,
+    DocNum: header.docNum ?? null,
+    FormNo: header.formNo ?? null,
+    IssueDate: header.issueDate ?? null,
+    ItemCode: header.itemCode ?? null,
+    ItemName: header.itemName ?? null,
+    ProductTop: header.productTop ?? null,
+    ProductLine: header.productLine ?? null,
+    Composition: header.composition ?? null,
+    Product: header.product ?? null,
+    CatNo: header.catNo ?? null,
+    BatchNo: header.batchNo ?? null,
+    PackSize: header.packSize ?? null,
+    BatchSize: header.batchSize ?? null,
+    MfgDate: header.mfgDate ?? null,
+    ExpDate: header.expDate ?? null,
+    SopNo: header.sopNo ?? null,
+    ProcessStage: header.processStage ?? null,
+    RevisionNo: header.revisionNo ?? null,
+    RegNo: header.regNo ?? null,
+    DateReported: header.dateReported ?? null,
+    Remarks: row.Remarks,
+    tests: parseStoredTests(row.Tests),
+    AnalyzedByName: analyzed.name || null,
+    AnalyzedByTitle: analyzed.title || null,
+    AnalyzedByDate: analyzed.date || null,
+    CheckedByName: checked.name || null,
+    CheckedByTitle: checked.title || null,
+    CheckedByDate: checked.date || null,
+    ApprovedByName: approved.name || null,
+    ApprovedByTitle: approved.title || null,
+    ApprovedByDate: approved.date || null,
+    CreatedBy: row.CreatedBy,
+    CreatedByName: row.CreatedByName,
+    CreatedAt: row.CreatedAt,
+    UpdatedBy: row.UpdatedBy,
+    UpdatedByName: row.UpdatedByName,
+    UpdatedAt: row.UpdatedAt,
+    GeneratedAt: row.GeneratedAt,
+  };
+};
 
 const bindHeader = (request, header) => {
   Object.entries(header).forEach(([key, value]) => {
@@ -41,27 +115,14 @@ const bindHeader = (request, header) => {
   return request;
 };
 
-const replaceTests = async (transaction, coaNo, tests = []) => {
-  await new sql.Request(transaction)
-    .input('COA_No', sql.Int, coaNo)
-    .query(`DELETE FROM DOME.dbo.PMSCOAReportTest WHERE COA_No = @COA_No`);
-
-  for (let i = 0; i < tests.length; i++) {
-    const t = tests[i] || {};
-    await new sql.Request(transaction)
-      .input('COA_No', sql.Int, coaNo)
-      .input('LineId', sql.Int, i + 1)
-      .input('Tests', sql.NVarChar(sql.MAX), t.tests || t.test || null)
-      .input('Specifications', sql.NVarChar(sql.MAX), t.specifications || t.specification || null)
-      .input('AnalyzedBy', sql.NVarChar(100), t.analyzedBy || null)
-      .input('Result', sql.NVarChar(500), t.result || null)
-      .input('Conclusion', sql.NVarChar(500), t.conclusion || null)
-      .query(`
-        INSERT INTO DOME.dbo.PMSCOAReportTest
-          (COA_No, LineId, Tests, Specifications, AnalyzedBy, Result, Conclusion)
-        VALUES
-          (@COA_No, @LineId, @Tests, @Specifications, @AnalyzedBy, @Result, @Conclusion)
-      `);
+const parseStoredTests = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 };
 
@@ -88,9 +149,9 @@ const listCOAReports = async (req, res) => {
         request.input('Search', sql.NVarChar, `%${search}%`);
         conditions.push(`(
           CAST(H.COA_No AS NVARCHAR(20)) LIKE @Search
-          OR H.ItemCode LIKE @Search
-          OR H.ItemName LIKE @Search
-          OR H.BatchNo LIKE @Search
+          OR JSON_VALUE(H.Header, '$.itemCode') LIKE @Search
+          OR JSON_VALUE(H.Header, '$.itemName') LIKE @Search
+          OR JSON_VALUE(H.Header, '$.batchNo') LIKE @Search
           OR H.CreatedByName LIKE @Search
         )`);
       }
@@ -107,7 +168,7 @@ const listCOAReports = async (req, res) => {
       }
       if (productLine) {
         request.input('ProductLine', sql.NVarChar, productLine);
-        conditions.push(`LTRIM(RTRIM(H.ProductLine)) = @ProductLine`);
+        conditions.push(`LTRIM(RTRIM(JSON_VALUE(H.Header, '$.productLine'))) = @ProductLine`);
       }
       if (fromDate) {
         request.input('FromDate', sql.VarChar, fromDate);
@@ -142,16 +203,16 @@ const listCOAReports = async (req, res) => {
       .query(`
         SELECT
           H.COA_No,
-          H.DocNum,
+          JSON_VALUE(H.Header, '$.docNum') AS DocNum,
           H.Status,
-          H.FormNo,
-          H.IssueDate,
-          H.ItemCode,
-          H.ItemName,
-          H.ProductTop,
-          H.ProductLine,
-          H.Product,
-          H.BatchNo,
+          JSON_VALUE(H.Header, '$.formNo') AS FormNo,
+          JSON_VALUE(H.Header, '$.issueDate') AS IssueDate,
+          JSON_VALUE(H.Header, '$.itemCode') AS ItemCode,
+          JSON_VALUE(H.Header, '$.itemName') AS ItemName,
+          JSON_VALUE(H.Header, '$.productTop') AS ProductTop,
+          JSON_VALUE(H.Header, '$.productLine') AS ProductLine,
+          JSON_VALUE(H.Header, '$.product') AS Product,
+          JSON_VALUE(H.Header, '$.batchNo') AS BatchNo,
           H.CreatedBy,
           H.CreatedByName,
           H.CreatedAt,
@@ -166,7 +227,7 @@ const listCOAReports = async (req, res) => {
       `);
 
     const optionsResult = await pool.request().query(`
-      SELECT DISTINCT LTRIM(RTRIM(ProductLine)) AS ProductLine, Status
+      SELECT DISTINCT LTRIM(RTRIM(JSON_VALUE(Header, '$.productLine'))) AS ProductLine, Status
       FROM DOME.dbo.PMSCOAReport
     `);
     const productLines = [...new Set((optionsResult.recordset || []).map((row) => row.ProductLine).filter(Boolean))].sort();
@@ -201,10 +262,10 @@ const getUsedBatches = async (req, res) => {
     const result = await pool.request()
       .input('ItemCode', sql.NVarChar(50), itemCode)
       .query(`
-        SELECT DISTINCT BatchNo
+        SELECT DISTINCT JSON_VALUE(Header, '$.batchNo') AS BatchNo
         FROM DOME.dbo.PMSCOAReport
-        WHERE ItemCode = @ItemCode
-          AND ISNULL(BatchNo, '') <> ''
+        WHERE JSON_VALUE(Header, '$.itemCode') = @ItemCode
+          AND ISNULL(JSON_VALUE(Header, '$.batchNo'), '') <> ''
       `);
 
     res.json({
@@ -233,21 +294,9 @@ const getCOAReport = async (req, res) => {
       return res.status(404).json({ success: false, message: 'COA report not found' });
     }
 
-    const testsResult = await pool.request()
-      .input('COA_No', sql.Int, coaNo)
-      .query(`
-        SELECT LineId, Tests, Specifications, AnalyzedBy, Result, Conclusion
-        FROM DOME.dbo.PMSCOAReportTest
-        WHERE COA_No = @COA_No
-        ORDER BY LineId
-      `);
-
     res.json({
       success: true,
-      data: {
-        ...headerResult.recordset[0],
-        tests: testsResult.recordset
-      }
+      data: expandReport(headerResult.recordset[0])
     });
   } catch (error) {
     console.error('Error fetching COA report:', error);
@@ -261,9 +310,12 @@ const saveCOAReport = async (req, res) => {
 
   try {
     const body = req.body || {};
-    const status = body.status === 'Generated' || body.status === 'Pending' ? 'Pending' : 'Draft';
+    const status = body.status === 'Generated' || body.status === 'Pending'
+      ? 'Pending'
+      : body.status === 'Hold'
+        ? 'Hold'
+        : 'Draft';
     const coaNoInput = body.coaNo ? parseInt(body.coaNo, 10) : null;
-    const tests = Array.isArray(body.tests) ? body.tests : [];
     const userId = body.createdBy || body.updatedBy || 0;
     const userName = body.createdByName || body.updatedByName || null;
     const header = mapHeader(body, status);
@@ -292,37 +344,14 @@ const saveCOAReport = async (req, res) => {
 
       await updateReq.query(`
         UPDATE DOME.dbo.PMSCOAReport SET
-          DocNum = @DocNum,
           Status = @Status,
-          FormNo = @FormNo,
-          IssueDate = @IssueDate,
-          ItemCode = @ItemCode,
-          ItemName = @ItemName,
-          ProductTop = @ProductTop,
-          ProductLine = @ProductLine,
-          Composition = @Composition,
-          Product = @Product,
-          CatNo = @CatNo,
-          BatchNo = @BatchNo,
-          PackSize = @PackSize,
-          BatchSize = @BatchSize,
-          MfgDate = @MfgDate,
-          ExpDate = @ExpDate,
-          SopNo = @SopNo,
-          ProcessStage = @ProcessStage,
-          RevisionNo = @RevisionNo,
-          RegNo = @RegNo,
-          DateReported = @DateReported,
+          Header = @Header,
+          Tests = @Tests,
+          StatementOfConformity = @StatementOfConformity,
           Remarks = @Remarks,
-          AnalyzedByName = @AnalyzedByName,
-          AnalyzedByTitle = @AnalyzedByTitle,
-          AnalyzedByDate = @AnalyzedByDate,
-          CheckedByName = @CheckedByName,
-          CheckedByTitle = @CheckedByTitle,
-          CheckedByDate = @CheckedByDate,
-          ApprovedByName = @ApprovedByName,
-          ApprovedByTitle = @ApprovedByTitle,
-          ApprovedByDate = @ApprovedByDate,
+          AnalyzedBy = @AnalyzedBy,
+          CheckedBy = @CheckedBy,
+          ApprovedBy = @ApprovedBy,
           UpdatedBy = @UpdatedBy,
           UpdatedByName = @UpdatedByName,
           UpdatedAt = GETDATE(),
@@ -346,29 +375,18 @@ const saveCOAReport = async (req, res) => {
 
       await insertReq.query(`
         INSERT INTO DOME.dbo.PMSCOAReport (
-          COA_No, DocNum, Status, FormNo, IssueDate, ItemCode, ItemName,
-          ProductTop, ProductLine, Composition, Product, CatNo, BatchNo,
-          PackSize, BatchSize, MfgDate, ExpDate, SopNo, ProcessStage,
-          RevisionNo, RegNo, DateReported, Remarks,
-          AnalyzedByName, AnalyzedByTitle, AnalyzedByDate,
-          CheckedByName, CheckedByTitle, CheckedByDate,
-          ApprovedByName, ApprovedByTitle, ApprovedByDate,
+          COA_No, Status, Header, Tests, StatementOfConformity, Remarks,
+          AnalyzedBy, CheckedBy, ApprovedBy,
           CreatedBy, CreatedByName, CreatedAt, UpdatedBy, UpdatedByName, UpdatedAt, GeneratedAt
         ) VALUES (
-          @COA_No, @DocNum, @Status, @FormNo, @IssueDate, @ItemCode, @ItemName,
-          @ProductTop, @ProductLine, @Composition, @Product, @CatNo, @BatchNo,
-          @PackSize, @BatchSize, @MfgDate, @ExpDate, @SopNo, @ProcessStage,
-          @RevisionNo, @RegNo, @DateReported, @Remarks,
-          @AnalyzedByName, @AnalyzedByTitle, @AnalyzedByDate,
-          @CheckedByName, @CheckedByTitle, @CheckedByDate,
-          @ApprovedByName, @ApprovedByTitle, @ApprovedByDate,
+          @COA_No, @Status, @Header, @Tests, @StatementOfConformity, @Remarks,
+          @AnalyzedBy, @CheckedBy, @ApprovedBy,
           @CreatedBy, @CreatedByName, GETDATE(), @UpdatedBy, @UpdatedByName, GETDATE(),
           CASE WHEN @Status = 'Pending' THEN GETDATE() ELSE NULL END
         )
       `);
     }
 
-    await replaceTests(transaction, coaNo, tests);
     await transaction.commit();
 
     res.status(isUpdate ? 200 : 201).json({
