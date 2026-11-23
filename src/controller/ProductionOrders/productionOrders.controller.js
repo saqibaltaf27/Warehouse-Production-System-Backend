@@ -896,7 +896,7 @@ WITH BomItems AS (
         L.Code AS ComponentCode,
         L.ItemName AS ComponentName,
         L.Quantity AS BaseQty,
-        I.InvntryUom AS UoMName,
+        C.InvntryUom AS UoMName,
         W.WhsCode AS Warehouse,
 
         W.OnHand AS AvailableStock,
@@ -940,6 +940,8 @@ WITH BomItems AS (
         ON T.Code = L.Father
     INNER JOIN LDS_LIVE.dbo.OITM I
         ON T.Code = I.ItemCode
+    INNER JOIN LDS_LIVE.dbo.OITM C
+        ON L.Code = C.ItemCode
     INNER JOIN LDS_LIVE.dbo.OITW W
         ON L.Code = W.ItemCode
        AND W.WhsCode IN ('11','14', '15')

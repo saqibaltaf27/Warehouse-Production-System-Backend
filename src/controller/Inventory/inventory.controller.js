@@ -7,7 +7,7 @@ const { poolPromise } = require("../../database/connection");
 class InventoryController {
     static async getInventoryFilters(req, res) {
         try {
-            const company = req.query.company || null;
+            const company = 'LDS';
             const filters = await inventoryModel.getInventoryFilters(company);
             sendSuccess(res, filters, "Filters fetched successfully");
         } catch (err) {
@@ -19,7 +19,7 @@ class InventoryController {
         try {
             const sanitize = (val) => (val && val !== 'ALL' ? val : null);
             const filters = {
-                company: sanitize(req.query.company),
+                company: 'LDS',
                 group: sanitize(req.query.group),
                 category: sanitize(req.query.category),
                 warehouse: sanitize(req.query.warehouse),
@@ -49,7 +49,7 @@ class InventoryController {
             const pagination = { limit, offset, page };
             const sorting = { sortBy, sortOrder };
             const filters = {
-                company: sanitize(req.query.company),
+                company: 'LDS',
                 group: sanitize(req.query.group),
                 category: sanitize(req.query.category),
                 warehouse: sanitize(req.query.warehouse),
@@ -82,7 +82,7 @@ class InventoryController {
             const sanitize = (val) => (val && val !== 'ALL' ? val : null);
 
             const filters = {
-                company: sanitize(req.query.company),
+                company: 'LDS',
                 group: sanitize(req.query.group),
                 category: sanitize(req.query.category),
                 warehouse: sanitize(req.query.warehouse),

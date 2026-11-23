@@ -30,7 +30,6 @@ class InventoryModel {
             const pool = await poolPromise;
             
             const companies = [
-                { value: 'GMS', label: 'GMS' },
                 { value: 'LDS', label: 'LDS' }
             ];
 
@@ -68,7 +67,7 @@ class InventoryModel {
                 SELECT DISTINCT value, label FROM (
                     SELECT U_Cat1 AS value, U_Cat1 AS label FROM gms_live.dbo.OITM WHERE U_Cat1 IS NOT NULL AND ('GMS' = ISNULL(@company, 'GMS') OR @company IS NULL)
                     UNION
-                    SELECT U_Cat1 AS value, U_Cat1 AS label FROM lds_live.dbo.OITM WHERE U_Cat1 IS NOT NULL AND ('LDS' = ISNULL(@company, 'LDS') OR @company IS NULL)
+                    SELECT U_Cat1 AS value, U_Cat1 AS label FROM lds_live.dbo.OITM WHERE U_Cat1 IS NOT NULL AND U_Type IN (N'Semi-Finished Goods', N'Finished Product') AND ('LDS' = ISNULL(@company, 'LDS') OR @company IS NULL)
                 ) AS Q4;
             `;
 
@@ -195,6 +194,7 @@ class InventoryModel {
                 INNER JOIN lds_live.dbo.OITM T2 ON T0.ItemCode = T2.ItemCode
                 WHERE T1.Quantity > 0
                   AND T0.ExpDate IS NOT NULL
+                  AND T2.U_Type IN (N'Semi-Finished Goods', N'Finished Product')
                   ${warehouseFilterLDS}
                   ${filterSqlT2}
                 GROUP BY T0.ItemCode, T2.ItemName, T2.FrgnName, T2.U_Cat1, T0.DistNumber, T0.ExpDate, T2.LstEvlPric
@@ -220,6 +220,7 @@ class InventoryModel {
                 INNER JOIN lds_live.dbo.OITM T2 ON T0.ItemCode = T2.ItemCode
                 WHERE T1.Quantity > 0
                   AND T0.ExpDate IS NOT NULL
+                  AND T2.U_Type IN (N'Semi-Finished Goods', N'Finished Product')
                   ${warehouseFilterLDS}
                   ${filterSqlT2}
                 GROUP BY T0.ItemCode, T2.ItemName, T2.FrgnName, T2.U_Cat1, T0.DistNumber, T0.ExpDate, T2.LstEvlPric
@@ -416,19 +417,19 @@ class InventoryModel {
                 (SELECT COUNT(*) FROM (
                     ${(!filters.company || filters.company === 'GMS') ? `SELECT ItemCode FROM gms_live.dbo.OITM ${warehouseFilterGMS} WHERE FrozenFor = 'N' ${filterSqlOITM}` : ''}
                     ${(!filters.company) ? ' UNION ALL ' : ''}
-                    ${(!filters.company || filters.company === 'LDS') ? `SELECT ItemCode FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE FrozenFor = 'N' ${filterSqlOITM}` : ''}
+                    ${(!filters.company || filters.company === 'LDS') ? `SELECT ItemCode FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE FrozenFor = 'N' AND U_Type IN (N'Semi-Finished Goods', N'Finished Product') ${filterSqlOITM}` : ''}
                 ) AS ActiveItems) AS TotalActiveItems,
                 
                 (SELECT COUNT(DISTINCT ItmsGrpCod) FROM (
                     ${(!filters.company || filters.company === 'GMS') ? `SELECT ItmsGrpCod FROM gms_live.dbo.OITM ${warehouseFilterGMS} WHERE FrozenFor = 'N' ${filterSqlOITM}` : ''}
                     ${(!filters.company) ? ' UNION ' : ''}
-                    ${(!filters.company || filters.company === 'LDS') ? `SELECT ItmsGrpCod FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE FrozenFor = 'N' ${filterSqlOITM}` : ''}
+                    ${(!filters.company || filters.company === 'LDS') ? `SELECT ItmsGrpCod FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE FrozenFor = 'N' AND U_Type IN (N'Semi-Finished Goods', N'Finished Product') ${filterSqlOITM}` : ''}
                 ) AS Grps) AS TotalItemGroups,
 
                 (SELECT COUNT(DISTINCT Category) FROM (
                     ${(!filters.company || filters.company === 'GMS') ? `SELECT U_Cat1 AS Category FROM gms_live.dbo.OITM ${warehouseFilterGMS} WHERE FrozenFor = 'N' AND U_Cat1 IS NOT NULL AND LTRIM(RTRIM(U_Cat1)) <> '' ${filterSqlOITM}` : ''}
                     ${(!filters.company) ? ' UNION ' : ''}
-                    ${(!filters.company || filters.company === 'LDS') ? `SELECT U_Cat1 AS Category FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE FrozenFor = 'N' AND U_Cat1 IS NOT NULL AND LTRIM(RTRIM(U_Cat1)) <> '' ${filterSqlOITM}` : ''}
+                    ${(!filters.company || filters.company === 'LDS') ? `SELECT U_Cat1 AS Category FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE FrozenFor = 'N' AND U_Type IN (N'Semi-Finished Goods', N'Finished Product') AND U_Cat1 IS NOT NULL AND LTRIM(RTRIM(U_Cat1)) <> '' ${filterSqlOITM}` : ''}
                 ) AS Cats) AS TotalCategories,
 
                 (SELECT COUNT(*) FROM (
@@ -444,7 +445,7 @@ class InventoryModel {
             catQueries.push(`SELECT 'GMS' AS Company, OITM.U_Cat1 AS Category, COUNT(*) AS ActiveItems FROM gms_live.dbo.OITM ${warehouseFilterGMS} WHERE OITM.FrozenFor = 'N' ${filterSqlOITM} GROUP BY OITM.U_Cat1`);
         }
         if (!filters.company || filters.company === 'LDS') {
-            catQueries.push(`SELECT 'LDS' AS Company, OITM.U_Cat1 AS Category, COUNT(*) AS ActiveItems FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE OITM.FrozenFor = 'N' ${filterSqlOITM} GROUP BY OITM.U_Cat1`);
+            catQueries.push(`SELECT 'LDS' AS Company, OITM.U_Cat1 AS Category, COUNT(*) AS ActiveItems FROM lds_live.dbo.OITM ${warehouseFilterLDS} WHERE OITM.FrozenFor = 'N' AND OITM.U_Type IN (N'Semi-Finished Goods', N'Finished Product') ${filterSqlOITM} GROUP BY OITM.U_Cat1`);
         }
 
         // Groups query
@@ -453,7 +454,7 @@ class InventoryModel {
             grpQueries.push(`SELECT 'GMS' AS Company, T1.ItmsGrpCod, T1.ItmsGrpNam, COUNT(*) AS ActiveItems FROM gms_live.dbo.OITM T0 INNER JOIN gms_live.dbo.OITB T1 ON T0.ItmsGrpCod = T1.ItmsGrpCod ${warehouseFilterGMS.replace('OITM.','T0.')} WHERE T0.FrozenFor = 'N' ${filterSqlT0} GROUP BY T1.ItmsGrpCod, T1.ItmsGrpNam`);
         }
         if (!filters.company || filters.company === 'LDS') {
-            grpQueries.push(`SELECT 'LDS' AS Company, T1.ItmsGrpCod, T1.ItmsGrpNam, COUNT(*) AS ActiveItems FROM lds_live.dbo.OITM T0 INNER JOIN lds_live.dbo.OITB T1 ON T0.ItmsGrpCod = T1.ItmsGrpCod ${warehouseFilterLDS.replace('OITM.','T0.')} WHERE T0.FrozenFor = 'N' ${filterSqlT0} GROUP BY T1.ItmsGrpCod, T1.ItmsGrpNam`);
+            grpQueries.push(`SELECT 'LDS' AS Company, T1.ItmsGrpCod, T1.ItmsGrpNam, COUNT(*) AS ActiveItems FROM lds_live.dbo.OITM T0 INNER JOIN lds_live.dbo.OITB T1 ON T0.ItmsGrpCod = T1.ItmsGrpCod ${warehouseFilterLDS.replace('OITM.','T0.')} WHERE T0.FrozenFor = 'N' AND T0.U_Type IN (N'Semi-Finished Goods', N'Finished Product') ${filterSqlT0} GROUP BY T1.ItmsGrpCod, T1.ItmsGrpNam`);
         }
 
         // Warehouses query
@@ -462,7 +463,7 @@ class InventoryModel {
             whsQueries.push(`SELECT 'GMS' AS Company, T0.WhsCode, T0.WhsName, COUNT(DISTINCT T1.ItemCode) AS ActiveItemCount FROM gms_live.dbo.OWHS T0 INNER JOIN gms_live.dbo.OITW T1 ON T0.WhsCode = T1.WhsCode INNER JOIN gms_live.dbo.OITM T2 ON T1.ItemCode = T2.ItemCode WHERE T2.FrozenFor = 'N' AND T1.OnHand > 0 ${filterSqlT0.replace('T0.','T2.')} ${filters.warehouse ? 'AND T0.WhsCode=@warehouse' : ''} GROUP BY T0.WhsCode, T0.WhsName`);
         }
         if (!filters.company || filters.company === 'LDS') {
-            whsQueries.push(`SELECT 'LDS' AS Company, T0.WhsCode, T0.WhsName, COUNT(DISTINCT T1.ItemCode) AS ActiveItemCount FROM lds_live.dbo.OWHS T0 INNER JOIN lds_live.dbo.OITW T1 ON T0.WhsCode = T1.WhsCode INNER JOIN lds_live.dbo.OITM T2 ON T1.ItemCode = T2.ItemCode WHERE T2.FrozenFor = 'N' AND T1.OnHand > 0 ${filterSqlT0.replace('T0.','T2.')} ${filters.warehouse ? 'AND T0.WhsCode=@warehouse' : ''} GROUP BY T0.WhsCode, T0.WhsName`);
+            whsQueries.push(`SELECT 'LDS' AS Company, T0.WhsCode, T0.WhsName, COUNT(DISTINCT T1.ItemCode) AS ActiveItemCount FROM lds_live.dbo.OWHS T0 INNER JOIN lds_live.dbo.OITW T1 ON T0.WhsCode = T1.WhsCode INNER JOIN lds_live.dbo.OITM T2 ON T1.ItemCode = T2.ItemCode WHERE T2.FrozenFor = 'N' AND T2.U_Type IN (N'Semi-Finished Goods', N'Finished Product') AND T1.OnHand > 0 ${filterSqlT0.replace('T0.','T2.')} ${filters.warehouse ? 'AND T0.WhsCode=@warehouse' : ''} GROUP BY T0.WhsCode, T0.WhsName`);
         }
 
         let fullQuery = `
@@ -514,7 +515,7 @@ class InventoryModel {
             queries.push(`SELECT 'GMS' AS Company, OITM.ItemCode AS ItemCode, OITM.ItemName AS ItemName, OITM.FrgnName AS FrgnName, OITM.ItmsGrpCod AS ItemGroup, OITM.U_Cat1 AS Category, OITM.CodeBars AS Barcode, OITM.CardCode AS Supplier, OITM.CreateDate AS CreatedDate, OITM.DfltWH AS DefaultWarehouse, OITM.ManBtchNum AS BatchTracked, OITM.ManSerNum AS SerialTracked, OITM.OnHand AS Stock, OITM.AvgPrice AS Price, OITM.LstEvlPric AS LstEvlPric, OITM.U_Division AS BusinessSegment, P1.CardName AS Principal, T1.IncreasAc AS GoodsReceiptAcctCode, A1.AcctName AS GoodsReceiptAcctName, T1.DecreasAc AS GoodsIssueAcctCode, A2.AcctName AS GoodsIssueAcctName FROM gms_live.dbo.OITM INNER JOIN gms_live.dbo.OITB T1 ON OITM.ItmsGrpCod = T1.ItmsGrpCod LEFT JOIN gms_live.dbo.OACT A1 ON T1.IncreasAc = A1.AcctCode LEFT JOIN gms_live.dbo.OACT A2 ON T1.DecreasAc = A2.AcctCode LEFT JOIN gms_live.dbo.OCRD P1 ON OITM.CardCode = P1.CardCode ${warehouseFilterGMS} WHERE 1=1 AND OITM.FrozenFor = 'N' ${filters.hideZeroQty ? 'AND OITM.OnHand > 0' : ''} ${filterSql} ${searchSql}`);
         }
         if (!filters.company || filters.company === 'LDS') {
-            queries.push(`SELECT 'LDS' AS Company, OITM.ItemCode AS ItemCode, OITM.ItemName AS ItemName, OITM.FrgnName AS FrgnName, OITM.ItmsGrpCod AS ItemGroup, OITM.U_Cat1 AS Category, OITM.CodeBars AS Barcode, OITM.CardCode AS Supplier, OITM.CreateDate AS CreatedDate, OITM.DfltWH AS DefaultWarehouse, OITM.ManBtchNum AS BatchTracked, OITM.ManSerNum AS SerialTracked, OITM.OnHand AS Stock, OITM.AvgPrice AS Price, OITM.LstEvlPric AS LstEvlPric, OITM.U_Division AS BusinessSegment, P1.CardName AS Principal, T1.IncreasAc AS GoodsReceiptAcctCode, A1.AcctName AS GoodsReceiptAcctName, T1.DecreasAc AS GoodsIssueAcctCode, A2.AcctName AS GoodsIssueAcctName FROM lds_live.dbo.OITM INNER JOIN lds_live.dbo.OITB T1 ON OITM.ItmsGrpCod = T1.ItmsGrpCod LEFT JOIN lds_live.dbo.OACT A1 ON T1.IncreasAc = A1.AcctCode LEFT JOIN lds_live.dbo.OACT A2 ON T1.DecreasAc = A2.AcctCode LEFT JOIN lds_live.dbo.OCRD P1 ON OITM.CardCode = P1.CardCode ${warehouseFilterLDS} WHERE 1=1 AND OITM.FrozenFor = 'N' ${filters.hideZeroQty ? 'AND OITM.OnHand > 0' : ''} ${filterSql} ${searchSql}`);
+            queries.push(`SELECT 'LDS' AS Company, OITM.ItemCode AS ItemCode, OITM.ItemName AS ItemName, OITM.FrgnName AS FrgnName, OITM.ItmsGrpCod AS ItemGroup, OITM.U_Cat1 AS Category, OITM.CodeBars AS Barcode, OITM.CardCode AS Supplier, OITM.CreateDate AS CreatedDate, OITM.DfltWH AS DefaultWarehouse, OITM.ManBtchNum AS BatchTracked, OITM.ManSerNum AS SerialTracked, OITM.OnHand AS Stock, OITM.AvgPrice AS Price, OITM.LstEvlPric AS LstEvlPric, OITM.U_Division AS BusinessSegment, P1.CardName AS Principal, T1.IncreasAc AS GoodsReceiptAcctCode, A1.AcctName AS GoodsReceiptAcctName, T1.DecreasAc AS GoodsIssueAcctCode, A2.AcctName AS GoodsIssueAcctName FROM lds_live.dbo.OITM INNER JOIN lds_live.dbo.OITB T1 ON OITM.ItmsGrpCod = T1.ItmsGrpCod LEFT JOIN lds_live.dbo.OACT A1 ON T1.IncreasAc = A1.AcctCode LEFT JOIN lds_live.dbo.OACT A2 ON T1.DecreasAc = A2.AcctCode LEFT JOIN lds_live.dbo.OCRD P1 ON OITM.CardCode = P1.CardCode ${warehouseFilterLDS} WHERE 1=1 AND OITM.FrozenFor = 'N' AND OITM.U_Type IN (N'Semi-Finished Goods', N'Finished Product') ${filters.hideZeroQty ? 'AND OITM.OnHand > 0' : ''} ${filterSql} ${searchSql}`);
         }
 
         let finalQuery = queries.join(" UNION ALL ");
