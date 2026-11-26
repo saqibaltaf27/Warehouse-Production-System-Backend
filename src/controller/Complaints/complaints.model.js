@@ -430,6 +430,7 @@ class ComplaintsModel {
                 SELECT TOP 1 P.DocEntry, P.DocNum, P.PlannedQty, P.CmpltQty, P.PostDate, P.U_BMR
                 FROM lds_live.dbo.OWOR P
                 WHERE P.ItemCode = T0.ItemCode
+                  AND LTRIM(RTRIM(P.Project)) = LTRIM(RTRIM(T1.DistNumber))
                 ORDER BY P.PostDate DESC, P.DocEntry DESC
             ) W
             WHERE T0.ItemCode = @ItemCode
