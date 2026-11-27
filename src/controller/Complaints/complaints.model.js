@@ -412,7 +412,7 @@ class ComplaintsModel {
                 END AS [BATCH SIZE],
                 W.U_BMR AS [BMR NO.],
                 ISNULL(T0.U_Type, '') AS [PROCESS STAGE],
-                T0.SuppCatNum AS [CAT NO.],
+                ISNULL(T0.FrgnName, '') AS [CAT NO.],
                 CASE 
                     WHEN NULLIF(LTRIM(RTRIM(T0.U_PackSize)), '') IS NULL THEN '' 
                     WHEN NULLIF(LTRIM(RTRIM(T0.CntUnitMsr)), '') IS NULL THEN LTRIM(RTRIM(T0.U_PackSize)) 
@@ -421,7 +421,7 @@ class ComplaintsModel {
                 CAST(T1.MnfDate AS DATE) AS [MFG DATE],
                 CAST(T1.ExpDate AS DATE) AS [EXP DATE],
                 CAST(GETDATE() AS DATE) AS [DATE REPORTED],
-                T0.FrgnName AS [REG],
+                '' AS [REG],
                 ISNULL(T0.U_GenericName, '') AS [COMPOSITION],
                 '' AS [REVISION NO.]
             FROM lds_live.dbo.OITM T0
